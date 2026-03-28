@@ -1,0 +1,1 @@
+Repositry containing AWS Lambda functions designed to assist with job hunting using AI agents.

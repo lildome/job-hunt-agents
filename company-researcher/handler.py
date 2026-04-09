@@ -93,7 +93,8 @@ research_confidence: {low | medium | high}"""
 def lambda_handler(event, context):
     logger.info(f"Event received: {json.dumps(event)}")
 
-    for record in event["Records"]:
+    records = event if isinstance(event, list) else event.get("Records", [])
+    for record in records:
         if record["eventName"] != "INSERT":
             continue
 
@@ -160,6 +161,9 @@ def lambda_handler(event, context):
             company_information['research_confidence'] = 'low'
 
         try:
+            existing = table.get_item(Key={'company_name': company_name}).get('Item', {})
+            current_count = existing.get('job_count', 0)
+
             table.put_item(Item={
                 'company_name': company_information.get('company_name', company_name),
                 'website': company_information.get('website', 'N/A'),
@@ -173,7 +177,7 @@ def lambda_handler(event, context):
                 'candidate_fit_reasoning': company_information.get('candidate_fit_reasoning', 'N/A'),
                 'research_confidence': company_information.get('research_confidence', 'low'),
                 'last_updated': datetime.now(timezone.utc).isoformat(),
-                'job_count': 1
+                'job_count': current_count
             })
             logger.info(f"Company information stored for: {company_name}")
         except Exception as e:

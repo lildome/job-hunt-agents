@@ -1,0 +1,22 @@
+{
+  "job_title": "Junior Software Engineer",
+  "job_summary": "We are looking for a Junior Software Engineer to join our backend infrastructure team. You will work on Python-based services, contribute to automation tooling, and help maintain Linux-based systems. The role involves collaborating with senior engineers on system design and participating in code reviews.",
+  "education_requirements": [
+    {"requirement": "Bachelor's degree in Computer Science or related field", "confidence": "mid"}
+  ],
+  "experience_requirements": [
+    {"requirement": "1-2 years of professional software development experience", "confidence": "mid"},
+    {"requirement": "Experience with Linux/Unix systems", "confidence": "high"},
+    {"requirement": "Experience with Python", "confidence": "high"},
+    {"requirement": "Familiarity with CI/CD pipelines", "confidence": "low"}
+  ],
+  "skill_requirements": [
+    {"requirement": "Python (scripting, automation)", "confidence": "high"},
+    {"requirement": "Bash/Shell scripting", "confidence": "high"},
+    {"requirement": "Git version control", "confidence": "mid"},
+    {"requirement": "SQL or NoSQL databases", "confidence": "mid"},
+    {"requirement": "Infrastructure-as-Code (Ansible, Terraform)", "confidence": "low"}
+  ],
+  "salary": "not specified",
+  "red_flags": "none identified"
+}

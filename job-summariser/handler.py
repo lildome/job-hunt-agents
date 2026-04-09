@@ -17,6 +17,9 @@ def get_parameter(name):
     response = ssm.get_parameter(Name=name, WithDecryption=True)
     return response['Parameter']['Value']
 
+api_key = get_parameter('anthropic-api-key')
+anthropic_client = anthropic.Anthropic(api_key=api_key)
+
 def deserialize_item(dynamo_item):
     return {k: deserializer.deserialize(v) for k, v in dynamo_item.items()}
 
@@ -54,7 +57,8 @@ red_flags: {note anything that might be viewed negatively by a prospective emplo
 def lambda_handler(event, context):
     logger.info(f"Event received: {json.dumps(event)}")
 
-    for record in event["Records"]:
+    records = event if isinstance(event, list) else event.get("Records", [])
+    for record in records:
         if record["eventName"] != "INSERT":
             continue
 
@@ -65,12 +69,9 @@ def lambda_handler(event, context):
 
         logger.info(f"Summarising job description for: {job.get('positionName')} at {job.get('company')}")
 
-        api_key = get_parameter('anthropic-api-key')
-        client = anthropic.Anthropic(api_key=api_key)
-
         user_prompt = build_prompt(job_description)
 
-        response = client.messages.create(
+        response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1500,
             system=SYSTEM_PROMPT,
@@ -122,4 +123,5 @@ def lambda_handler(event, context):
             logger.info(f"Job summary stored for: {job.get('positionName')} at {job.get('company')}")
         except Exception as e:
             logger.error(f"Error storing job summary for {job.get('positionName')} at {job.get('company')}: {e}")
-        
+
+    return {"job_id": job["id"]}

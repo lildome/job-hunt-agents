@@ -1,7 +1,9 @@
 import json
 import logging
+import time
 import boto3
 import anthropic
+from anthropic import RateLimitError
 from boto3.dynamodb.types import TypeDeserializer
 
 logger = logging.getLogger()
@@ -18,7 +20,7 @@ def get_parameter(name):
     return response['Parameter']['Value']
 
 api_key = get_parameter('anthropic-api-key')
-anthropic_client = anthropic.Anthropic(api_key=api_key)
+anthropic_client = anthropic.Anthropic(api_key=api_key, max_retries=8)
 
 def deserialize_item(dynamo_item):
     return {k: deserializer.deserialize(v) for k, v in dynamo_item.items()}
@@ -71,12 +73,18 @@ def lambda_handler(event, context):
 
         user_prompt = build_prompt(job_description)
 
-        response = anthropic_client.messages.create(
+        api_kwargs = dict(
             model="claude-sonnet-4-6",
             max_tokens=1500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}]
         )
+        try:
+            response = anthropic_client.messages.create(**api_kwargs)
+        except RateLimitError:
+            logger.warning("Rate limited — waiting 65s before retry")
+            time.sleep(65)
+            response = anthropic_client.messages.create(**api_kwargs)
         
         logger.info(f"Summarisation complete for: {job.get('positionName')} at {job.get('company')}")
         
@@ -98,7 +106,7 @@ def lambda_handler(event, context):
                     "confidence": confidence.strip()
                 })
                 continue
-            parts = line.split(": ", 1)
+            parts = line.split(":", 1)
             if len(parts) == 2:
                 key = parts[0].strip()
                 value = parts[1].strip()

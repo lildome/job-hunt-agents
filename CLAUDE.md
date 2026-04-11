@@ -24,20 +24,93 @@ Or use the full paths below when invoking them:
   <function-dir>/
 ```
 
+### Lambda function names
+- `job-scraper` — Apify scrape trigger
+- `job-processor` — SQS consumer, sequential orchestrator (MaxConcurrency=2)
+- `job-summariser` — extracts structured summary from job description
+- `company-researcher` — web search + company fit scoring
+- `cv-matcher` — scores CV against job summary
+- `resume-tailor` — on-demand resume tailoring
+- `cover-letter-generator` — on-demand cover letter generation
+- `api` — API Gateway handler (jobs list, auth, on-demand triggers)
+
+### Infrastructure
+- **SQS queue:** `job-processing-queue` (`https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue`)
+- **DynamoDB tables:** `jobs`, `companies`, `candidate_profiles`
+- **EventBridge Pipe:** DynamoDB stream → SQS (INSERT events only)
+
 ### Debugging Lambda issues
 When a pipeline test fails or a Lambda behaves unexpectedly, **always check the Lambda logs first** before investigating pipes, state machines, or DynamoDB. Common issues are timeouts and cold start errors that are only visible in the logs.
 
-```
-aws logs describe-log-streams --log-group-name /aws/lambda/<function-name> \
+One-liner to fetch the latest log stream and last 30 events:
+```bash
+STREAM=$(/opt/homebrew/bin/aws logs describe-log-streams \
+  --log-group-name /aws/lambda/<function-name> \
   --region us-east-1 --order-by LastEventTime --descending \
-  --query 'logStreams[0].logStreamName' --output text
+  --query 'logStreams[0].logStreamName' --output text) && \
+/opt/homebrew/bin/aws logs get-log-events \
+  --log-group-name /aws/lambda/<function-name> \
+  --log-stream-name "$STREAM" --region us-east-1 \
+  --query 'events[*].message' --output json
+```
 
-aws logs get-log-events --log-group-name /aws/lambda/<function-name> \
-  --log-stream-name <stream> --region us-east-1 \
-  --query 'events[-20:].message' --output json
+To check the most recent N streams (useful when multiple executions ran in parallel):
+```bash
+/opt/homebrew/bin/aws logs describe-log-streams \
+  --log-group-name /aws/lambda/<function-name> \
+  --region us-east-1 --order-by LastEventTime --descending \
+  --query 'logStreams[:3].{name: logStreamName, last: lastEventTimestamp}' \
+  --output json
 ```
 
 All AI Lambdas (job-summariser, company-researcher, cv-matcher, resume-tailor, cover-letter-generator) need **at least 120s timeout** — LLM API calls are slow. Default Lambda timeout is 3s and will silently time out.
+
+### Clearing tables between test runs
+Always purge the SQS queue when clearing tables — otherwise in-flight messages will re-insert ghost items.
+```bash
+# Clear jobs table
+/opt/homebrew/bin/aws dynamodb scan --table-name jobs --region us-east-1 \
+  --query 'Items[*].id.S' --output json | \
+python3 -c "
+import json, sys, subprocess
+ids = json.load(sys.stdin)
+for id in ids:
+    subprocess.run(['/opt/homebrew/bin/aws','dynamodb','delete-item','--table-name','jobs','--region','us-east-1','--key',json.dumps({'id':{'S':id}})],check=True)
+print(f'Deleted {len(ids)} jobs')
+"
+
+# Clear companies table
+/opt/homebrew/bin/aws dynamodb scan --table-name companies --region us-east-1 \
+  --query 'Items[*].company_name.S' --output json | \
+python3 -c "
+import json, sys, subprocess
+names = json.load(sys.stdin)
+for name in names:
+    subprocess.run(['/opt/homebrew/bin/aws','dynamodb','delete-item','--table-name','companies','--region','us-east-1','--key',json.dumps({'company_name':{'S':name}})],check=True)
+print(f'Deleted {len(names)} companies')
+"
+
+# Purge SQS queue
+/opt/homebrew/bin/aws sqs purge-queue \
+  --queue-url "https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue" \
+  --region us-east-1
+```
+Note: `purge-queue` can only be called once every 60 seconds. Wait ~30s after purging before scraping to ensure in-flight messages have drained.
+
+### Architecture decision log
+`ARCHITECTURE.md` in the repo root is a running log of every significant design and implementation decision made on this project. **Keep it up to date.** When a new decision is made — a bug fix that reveals a design flaw, a refactor, a new component, a change to an existing approach — add an entry under the relevant section using the format already established in the file:
+
+```
+### [Post-build] — Short title
+**What:** What was built or changed
+**Why:** The reasoning, including what problem it solves
+**Alternatives considered:** Other approaches that were evaluated
+```
+
+Use the tag prefix that best describes when the decision was made:
+- `[Pre-build]` — decided before any code was written
+- `[Build]` — decided during the initial build phase
+- `[Post-build]` — decided after the initial build (fixes, refactors, architectural changes)
 
 ### Running integration tests
 ```

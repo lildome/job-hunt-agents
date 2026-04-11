@@ -1,7 +1,9 @@
 import json
 import logging
+import time
 import boto3
 import anthropic
+from anthropic import RateLimitError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -15,7 +17,7 @@ def get_parameter(name):
     return ssm.get_parameter(Name=name, WithDecryption=True)['Parameter']['Value']
 
 api_key = get_parameter('anthropic-api-key')
-anthropic_client = anthropic.Anthropic(api_key=api_key)
+anthropic_client = anthropic.Anthropic(api_key=api_key, max_retries=8)
 
 SYSTEM_PROMPT = """You are an expert CV-to-job-description matching specialist.
 Your task is to evaluate how well a candidate's CV matches a given job's requirements.
@@ -64,12 +66,18 @@ def lambda_handler(event, context):
 
     user_prompt = build_prompt(job['summary'], cv)
 
-    response = anthropic_client.messages.create(
+    api_kwargs = dict(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}]
     )
+    try:
+        response = anthropic_client.messages.create(**api_kwargs)
+    except RateLimitError:
+        logger.warning("Rate limited — waiting 65s before retry")
+        time.sleep(65)
+        response = anthropic_client.messages.create(**api_kwargs)
 
     response_text = ""
     for block in response.content:

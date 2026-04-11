@@ -1,8 +1,10 @@
 import json
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 import boto3
 import anthropic
+from anthropic import RateLimitError
 from boto3.dynamodb.types import TypeDeserializer
 
 logger = logging.getLogger()
@@ -101,9 +103,13 @@ def lambda_handler(event, context):
         raw_item = record["dynamodb"]["NewImage"]
         job = deserialize_item(raw_item)
 
-        company_name = job["company"]
-        company_location = job["location"]
-        job_title = job["positionName"]
+        company_name = job.get("company")
+        company_location = job.get("location", "")
+        job_title = job.get("positionName", "")
+
+        if not company_name:
+            logger.warning("Record missing company field — skipping")
+            continue
 
         increment_job_count(company_name)
 
@@ -114,18 +120,23 @@ def lambda_handler(event, context):
         logger.info(f"Researching company: {company_name}")
 
         api_key = get_parameter('anthropic-api-key')
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, max_retries=8)
 
         user_prompt = build_prompt(company_name, company_location, job_title)
 
-        # Your research logic here
-        response = client.messages.create(
+        api_kwargs = dict(
             model="claude-sonnet-4-6",
-            max_tokens=1000,
+            max_tokens=2000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}]
         )
+        try:
+            response = client.messages.create(**api_kwargs)
+        except RateLimitError:
+            logger.warning(f"Rate limited researching {company_name} — waiting 65s before retry")
+            time.sleep(65)
+            response = client.messages.create(**api_kwargs)
         
         logger.info(f"Research complete for: {company_name}")
         
@@ -133,7 +144,6 @@ def lambda_handler(event, context):
         for block in response.content:
             if block.type == "text":
                 response_text += block.text
-                break
 
         company_information = {}
         culture_section = False
@@ -143,7 +153,7 @@ def lambda_handler(event, context):
             if stripped.startswith("- ") and culture_section:
                 company_information['culture_notes'].append(stripped[2:].strip())
                 continue
-            parts = line.split(": ", 1)
+            parts = line.split(":", 1)
             if len(parts) == 2:
                 key = parts[0].strip()
                 value = parts[1].strip()
@@ -151,7 +161,11 @@ def lambda_handler(event, context):
                     company_information['culture_notes'] = []
                     culture_section = True
                 elif key == 'candidate_fit_score':
-                    company_information[key] = int(value)
+                    try:
+                        company_information[key] = int(value.split('/')[0].strip())
+                    except (ValueError, IndexError):
+                        logger.warning(f"Could not parse candidate_fit_score: {value!r}")
+                        company_information[key] = 0
                 else:
                     culture_section = False
                     company_information[key] = value

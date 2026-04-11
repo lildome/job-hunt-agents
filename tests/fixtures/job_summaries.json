@@ -1,0 +1,370 @@
+{
+  "0": {
+    "job_title": "Principal Firmware Engineer / Team Lead",
+    "job_summary": "Catapult Sports is seeking a Principal Firmware Engineer / Team Lead based in Melbourne to lead a firmware development team building wearable tracking hardware for elite sports. The role involves developing Linux kernel and wireless firmware for ARM Cortex platforms, bringing up new hardware from scratch, and driving DevOps practices and engineering processes. The position requires a player-coach leadership style, including mentoring team members, partnering with product managers, and promoting technical strategy and innovation. The ultimate goal is to deliver high-quality firmware solutions for wearable and stadium infrastructure products used by over 4,600 professional sports teams worldwide.",
+    "education_requirements": [
+      {
+        "requirement": "Formal qualifications in electronics or software engineering",
+        "confidence": "high"
+      }
+    ],
+    "experience_requirements": [
+      {
+        "requirement": "5-10 years of firmware development experience",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with Linux (Yocto/PetaLinux), including kernel building, custom kernels, device trees, and Linux drivers",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience bringing up new hardware from scratch",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with wireless communications standards and protocols (BLE, Wi-Fi, UWB, long range/low bit rate)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience developing, scaling, and supporting products throughout the entire lifecycle",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Experience communicating with users, technical teams, and product management",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Experience with Atlassian platform for defect tracking and documentation",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Experience with Git code management",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Team lead or engineering leadership experience",
+        "confidence": "mid"
+      }
+    ],
+    "skill_requirements": [
+      {
+        "requirement": "C and C++ programming",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Python programming",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Strong verbal and written communication skills",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Organizational and time management skills",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Ability to work with minimal specifications and be proactive",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Understanding of high performance engineering and how to drive it",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Rust programming or willingness to learn",
+        "confidence": "low"
+      },
+      {
+        "requirement": "Occasional after-hours or weekend technical customer support",
+        "confidence": "low"
+      }
+    ],
+    "salary": "not specified",
+    "red_flags": "Occasional weekend and after-hours technical support required, which may indicate an expectation of availability outside standard working hours. The role spans a very broad scope including team leadership, hands-on firmware development, DevOps, architecture planning, and customer support, which could indicate an understaffed team or unrealistic expectations for a single role."
+  },
+  "1": {
+    "job_title": "System Development Manager",
+    "job_summary": "The System Development Manager will support AWS Region Services Operations in Australia, working in a DevOps capacity to develop and deploy operational tools that automate processes and reduce overhead. The role involves hiring, developing, and mentoring team members while collaborating with engineers to build and manage massively scaled distributed services. The candidate will participate in 24/7 on-call rotations, respond to high-severity events, and present solutions to senior leadership. Additionally, the role requires data collection, analytics, and dashboard creation to drive business improvement across AWS infrastructure.",
+    "education_requirements": [
+      {
+        "requirement": "No formal education requirements specified",
+        "confidence": "low"
+      }
+    ],
+    "experience_requirements": [
+      {
+        "requirement": "5+ years managing system or software development teams",
+        "confidence": "high"
+      },
+      {
+        "requirement": "7+ years of hands-on systems engineering and administration in networking, storage, and operating systems",
+        "confidence": "high"
+      },
+      {
+        "requirement": "7+ years leading definition and development of multi-tier web services",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience partnering with product or program management teams",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with AWS platforms, services, and design patterns",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Experience communicating with users, technical teams, and senior leadership",
+        "confidence": "mid"
+      }
+    ],
+    "skill_requirements": [
+      {
+        "requirement": "Linux proficiency (distros, package management, permissions, logging, auditing)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Linux command-line tools (grep, awk, sed, ip, ifconfig, tcpdump, strace, etc.)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "DNS and related tools (bind, host, dig, nslookup)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Runlevel and service management (systemd, rc.d, chkconfig)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "System monitoring tools (top, stat tools, etc.)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Git or other source control management tools",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Agile development practices",
+        "confidence": "high"
+      },
+      {
+        "requirement": "CI/CD and development pipelines",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Full software/hardware/network development lifecycle knowledge",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Ability to obtain Australian Government Security Vetting Agency (AGSVA) clearance",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Distributed systems design and delivery understanding",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Risk assessment and management",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Professional software engineering best practices and coding standards",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Data collection, analytics, and dashboard creation",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Strong communication and presentation skills for senior leadership",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Knowledge of systems engineering fundamentals (networking, storage, OS)",
+        "confidence": "mid"
+      }
+    ],
+    "salary": "not specified",
+    "red_flags": "The role requires participation in a 24/7 on-call rotation for high-severity issues, which may significantly impact work-life balance despite the company's stated commitment to work-life harmony. A government security clearance (AGSVA) is mandatory, which can be a lengthy and intrusive process and may restrict the eligible candidate pool. The breadth of the role \u2014 spanning development, operations, people management, senior leadership presentations, and on-call responsibilities \u2014 suggests a potentially high-pressure and demanding workload."
+  },
+  "2": {
+    "job_title": "Delivery Consultant \u2013 Software Engineer (AWS Professional Services)",
+    "job_summary": "AWS Professional Services is seeking a hands-on Delivery Consultant with deep software engineering and cloud architecture expertise to deliver complex technical consulting engagements for customers across Australia and New Zealand. The role involves designing and developing cloud-native solutions, implementing CI/CD pipelines and DevOps practices, and building distributed systems using AWS services. The consultant will provide technical leadership to customer and partner teams, guiding architectural decisions and ensuring solution quality and security. A strong focus is placed on innovation using AWS AI/ML services, including building AI-enabled applications and agent architectures. The position combines customer-facing consulting with deep hands-on software development responsibilities.",
+    "education_requirements": [
+      {
+        "requirement": "No formal education requirements specified",
+        "confidence": "low"
+      }
+    ],
+    "experience_requirements": [
+      {
+        "requirement": "5+ years of programming in at least one modern language (C++, C#, Java, Python, Golang, PowerShell, Ruby)",
+        "confidence": "high"
+      },
+      {
+        "requirement": "5+ years leading development of applications backed by AWS or other cloud-based services",
+        "confidence": "high"
+      },
+      {
+        "requirement": "5+ years of SDLC and agile/iterative methodologies building full stack applications",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with Infrastructure as Code (AWS CDK, CloudFormation, Terraform) and CI/CD pipelines",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with distributed systems, microservices architecture, and event-driven patterns at large scale",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Experience with containerization and orchestration technologies (Docker, Amazon ECS, Kubernetes)",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Experience with observability and monitoring tools (OpenTelemetry, Datadog, Splunk, Prometheus, Grafana)",
+        "confidence": "mid"
+      }
+    ],
+    "skill_requirements": [
+      {
+        "requirement": "Cloud-native solution design and development using AWS services",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Software development across full stack applications and modern development methodologies",
+        "confidence": "high"
+      },
+      {
+        "requirement": "DevOps practices including CI/CD pipeline implementation and infrastructure as code",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Technical leadership including code reviews, architectural guidance, and best practices",
+        "confidence": "high"
+      },
+      {
+        "requirement": "AI/ML application development including agent architectures and multi-agent systems",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "API design and implementation (REST, GraphQL, gRPC) and identity protocols (OpenID Connect, OAuth 2.0)",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Knowledge of RAG patterns, vector databases, embedding pipelines, and prompt engineering",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "Understanding of AI agent protocols (MCP, A2A) and development patterns",
+        "confidence": "low"
+      }
+    ],
+    "salary": "not specified",
+    "red_flags": "The role blends deep hands-on software engineering with customer-facing consulting, which may be a challenging balance for candidates who prefer one or the other. The breadth of preferred qualifications \u2014 spanning AI/ML, observability, containerisation, API design, and identity protocols \u2014 is extensive and may suggest unrealistic expectations. No salary or compensation range is provided, which limits transparency for prospective applicants."
+  },
+  "3": {
+    "job_title": "Automation Test Engineer",
+    "job_summary": "The Automation Test Engineer will utilize Accenture's proprietary Codeless Test Automation Suite (CTAS) to develop and execute automated test scripts. The role involves collaborating with development teams to ensure software meets quality standards while managing and maintaining the CTAS framework. The engineer will provide technical support to the team and contribute to problem-solving initiatives. This position offers opportunities for career growth and engagement with innovative technologies within a large global consulting firm.",
+    "education_requirements": [
+      {
+        "requirement": "Bachelor's Degree in a relevant field of study",
+        "confidence": "high"
+      }
+    ],
+    "experience_requirements": [
+      {
+        "requirement": "1-2 years of experience in relevant related skills",
+        "confidence": "high"
+      }
+    ],
+    "skill_requirements": [
+      {
+        "requirement": "Codeless Test Automation Suite (CTAS) development and execution",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Automated test script development",
+        "confidence": "high"
+      },
+      {
+        "requirement": "CTAS framework management and maintenance",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Technical support and team collaboration",
+        "confidence": "mid"
+      },
+      {
+        "requirement": "LLMOps at a Master proficiency level",
+        "confidence": "low"
+      }
+    ],
+    "salary": "not specified",
+    "red_flags": "The role requires expertise in Accenture's proprietary CTAS platform, which is an internal tool, meaning candidates are unlikely to have prior experience with it and may face a steep learning curve. The job description is notably vague about specific responsibilities and day-to-day tasks, offering little concrete detail about the actual work involved. The LLMOps \"Master\" proficiency preference seems mismatched for a role requiring only 1-2 years of experience."
+  },
+  "4": {
+    "job_title": "Graduate Full Stack Developer",
+    "job_summary": "Orikan is seeking a Graduate Full Stack Developer to join their Early Careers program, working on enterprise-grade web applications using the Microsoft .NET ecosystem. The role involves both front-end and back-end development, including building APIs, business logic, and responsive interfaces. Graduates will work alongside senior developers, designers, and product managers while gaining exposure to the full software development lifecycle. The position is based at Orikan's Melbourne Head Office with flexible working options, and includes structured mentoring and hands-on experience with production systems.",
+    "education_requirements": [
+      {
+        "requirement": "Completed degree in Computer Science, Software Engineering, or related field",
+        "confidence": "high"
+      }
+    ],
+    "experience_requirements": [
+      {
+        "requirement": "Exposure to ASP.NET Core through study or projects",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Exposure to Microsoft Azure or cloud platforms",
+        "confidence": "low"
+      },
+      {
+        "requirement": "Familiarity with Git and version control workflows",
+        "confidence": "low"
+      },
+      {
+        "requirement": "Awareness of CI/CD pipelines and deployment practices",
+        "confidence": "low"
+      },
+      {
+        "requirement": "Exposure to unit or automated testing",
+        "confidence": "low"
+      }
+    ],
+    "skill_requirements": [
+      {
+        "requirement": "Strong foundational knowledge of C# and Object-Oriented Programming",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Understanding of HTML, CSS and JavaScript",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Basic knowledge of SQL / relational databases",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Strong analytical and problem-solving skills",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Excellent communication skills and collaborative mindset",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Australian Permanent Residency or Citizenship",
+        "confidence": "high"
+      },
+      {
+        "requirement": "Understanding of RESTful API design and integration",
+        "confidence": "low"
+      }
+    ],
+    "salary": "not specified",
+    "red_flags": "Role requires Australian Permanent Residency or Citizenship, which significantly limits applicant eligibility including international graduates. Salary is not disclosed at any stage of the listing."
+  }
+}

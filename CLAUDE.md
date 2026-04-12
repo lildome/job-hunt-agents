@@ -124,3 +124,71 @@ python3 tests/test_<name>.py
   | /usr/local/bin/docker login --username AWS --password-stdin \
     052732928292.dkr.ecr.us-east-1.amazonaws.com
 ```
+
+---
+
+## CI/CD
+
+### GitHub Actions deploy pipeline
+`.github/workflows/deploy.yml` — added 2026-04-12 via cloud session.
+
+**What it does:** On push to `main`, detects which Lambda function directories changed and rebuilds/deploys only those functions. Uses OIDC auth (no stored AWS credentials), Docker Buildx with GHA layer cache, then calls `aws lambda update-function-code` to complete the deployment.
+
+**Status: workflow file is committed and pushed, but the AWS IAM setup is not yet done.**
+
+### ACTION REQUIRED — one-time AWS setup before the pipeline will work
+
+1. **Create the OIDC provider** (once per AWS account):
+```bash
+/opt/homebrew/bin/aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1 \
+  --region us-east-1
+```
+
+2. **Create IAM role** named `github-actions-lambda-deploy` with this trust policy:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::052732928292:oidc-provider/token.actions.githubusercontent.com" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:lildome/job-hunt-agents:*" }
+    }
+  }]
+}
+```
+
+3. **Attach this permissions policy** to the role:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage", "ecr:PutImage",
+        "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:052732928292:repository/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["lambda:UpdateFunctionCode"],
+      "Resource": "arn:aws:lambda:us-east-1:052732928292:function:*"
+    }
+  ]
+}
+```
+
+Once the role exists, any push to `main` that touches a function directory will trigger an automatic build and deploy. No GitHub secrets needed.

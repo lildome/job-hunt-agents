@@ -1,0 +1,95 @@
+name: Deploy Lambda Functions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'job-scraper/**'
+      - 'job-processor/**'
+      - 'job-summariser/**'
+      - 'company-researcher/**'
+      - 'cv-matcher/**'
+      - 'resume-tailor/**'
+      - 'cover-letter-generator/**'
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "052732928292"
+
+permissions:
+  id-token: write  # Required for OIDC token
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect changed functions
+    runs-on: ubuntu-latest
+    outputs:
+      functions: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'api/**'
+            job-scraper:
+              - 'job-scraper/**'
+            job-processor:
+              - 'job-processor/**'
+            job-summariser:
+              - 'job-summariser/**'
+            company-researcher:
+              - 'company-researcher/**'
+            cv-matcher:
+              - 'cv-matcher/**'
+            resume-tailor:
+              - 'resume-tailor/**'
+            cover-letter-generator:
+              - 'cover-letter-generator/**'
+
+  deploy:
+    name: Build & deploy ${{ matrix.function }}
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.functions != '[]' && needs.detect-changes.outputs.functions != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # Deploy other functions even if one fails
+      matrix:
+        function: ${{ fromJSON(needs.detect-changes.outputs.functions) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-lambda-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.function }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ matrix.function }}:latest
+          cache-from: type=gha,scope=${{ matrix.function }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.function }}
+
+      - name: Update Lambda function code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ matrix.function }}" \
+            --image-uri "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ matrix.function }}:latest" \
+            --region "${{ env.AWS_REGION }}"

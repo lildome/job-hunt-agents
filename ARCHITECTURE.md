@@ -248,6 +248,11 @@ like LangChain or CrewAI.
 
 ---
 
+### [Post-build] — GitHub Actions CI/CD pipeline
+**What:** Single GitHub Actions workflow (`.github/workflows/deploy.yml`) that detects which Lambda function directories changed on push to `main`, then builds and deploys only those functions. Uses `dorny/paths-filter` for change detection, Docker Buildx with GHA layer cache for fast builds, and updates each Lambda via `aws lambda update-function-code`.
+**Why:** Removes the manual ECR login → docker build → Lambda update cycle on every code change. Path-based filtering keeps the pipeline fast — touching only `cv-matcher/` rebuilds just that function, not all eight.
+**Alternatives considered:** Separate per-function workflows (more files, harder to maintain); rebuild all functions on every push (wasteful, ~8× slower); AWS CodePipeline (adds infra complexity for no benefit at single-user scale).
+
 ## Deferred / Planned
 
 - LinkedIn scraper implementation

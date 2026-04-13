@@ -25,6 +25,17 @@ like LangChain or CrewAI.
 **Alternatives considered:** Single model for everything, Claude Haiku for 
   mid-tier tasks
 
+### [Post-build] — Consolidated to Claude Sonnet 4.6 exclusively
+**What:** Dropped the Gemini 2.5 Flash tier entirely. All agents now use 
+  Claude Sonnet 4.6 exclusively.
+**Why:** The multi-model strategy added complexity without meaningful cost 
+  savings at single-user scale. Maintaining two API clients, two sets of 
+  credentials, and two prompt styles across the codebase introduced friction 
+  with no practical benefit. Claude Sonnet 4.6 handles all tasks well and 
+  keeping a single model simplifies debugging, testing, and prompt iteration.
+**Alternatives considered:** Keeping Gemini for lightweight tasks, switching 
+  to Claude Haiku for cost reduction
+
 ### [Pre-build] — Infrastructure
 **What:** AWS Lambda with Docker containers, DynamoDB, SSM Parameter Store
 **Why:** Lambda maps cleanly to agent architecture — one function per agent, 

@@ -48,6 +48,15 @@ Structure your output exactly as follows:
 [Education section unchanged]"""
 
 def build_prompt(job: dict, company: dict, cv: dict) -> str:
+    preferences = cv.get('preferences', {})
+    preferences_block = ""
+    if preferences:
+        preferences_block = f"""
+<candidate_preferences>
+{json.dumps(preferences, indent=2)}
+</candidate_preferences>
+"""
+
     return f"""
 <job_summary>
 {json.dumps(job.get('summary', {}), indent=2)}
@@ -57,7 +66,7 @@ def build_prompt(job: dict, company: dict, cv: dict) -> str:
 culture_notes: {json.dumps(company.get('culture_notes', []))}
 candidate_fit_reasoning: {company.get('candidate_fit_reasoning', 'N/A')}
 </company_context>
-
+{preferences_block}
 <candidate_cv>
 {json.dumps(cv, indent=2)}
 </candidate_cv>

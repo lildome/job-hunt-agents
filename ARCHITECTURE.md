@@ -287,3 +287,20 @@ like LangChain or CrewAI.
 - Testing and refinement pass across all agents
 - Onboarding agent (chat-based user config generation)
 - Multi-user support (user preferences and CV storage)
+
+---
+
+## Related Projects
+
+### [Planned] — Resume website migration: static S3 → AWS Amplify
+**What:** The resume website is currently hosted as a static site on S3. It 
+  needs to be migrated to AWS Amplify to support more complex client-side 
+  routing (deep links, dynamic routes) that S3's static hosting cannot handle 
+  without manual redirect rules.
+**Why:** S3 static hosting serves files by exact path — any route not 
+  corresponding to a real file returns a 404. Amplify handles this natively 
+  with a catch-all rewrite rule, making it the straightforward choice for 
+  single-page applications with multiple routes.
+**Alternatives considered:** CloudFront with custom error page redirect 
+  (works but adds infrastructure complexity); keeping S3 with manual redirect 
+  rules per route (brittle, doesn't scale as routes are added)

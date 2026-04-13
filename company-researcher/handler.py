@@ -179,7 +179,7 @@ def lambda_handler(event, context):
             current_count = existing.get('job_count', 0)
 
             table.put_item(Item={
-                'company_name': company_information.get('company_name', company_name),
+                'company_name': company_name,
                 'website': company_information.get('website', 'N/A'),
                 'industry': company_information.get('industry', 'N/A'),
                 'company_size': company_information.get('company_size', 'N/A'),

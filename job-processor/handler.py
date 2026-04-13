@@ -3,11 +3,14 @@ import logging
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-lambda_client = boto3.client('lambda', region_name='us-east-1')
+# Default read timeout is 60s — cv-matcher can take 65s+ when rate limited
+lambda_client = boto3.client('lambda', region_name='us-east-1',
+                             config=Config(read_timeout=300, connect_timeout=10))
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 jobs_table = dynamodb.Table('jobs')
 deserializer = TypeDeserializer()

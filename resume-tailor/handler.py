@@ -27,14 +27,23 @@ CRITICAL RULES:
 - Weight your emphasis toward requirements marked as 'high', then 'mid', then 'low'.
 - Output a complete tailored resume in clean markdown.
 
+SUMMARY RULES:
+- Write in a direct, confident, and human voice using first person.
+- Avoid buzzwords, superlatives, and vague claims — every sentence must be grounded in something specific from the CV.
+- Do not write like a recruiter — write like the candidate describing themselves plainly.
+- Weave in a natural signal from the candidate's preferences, particularly around learning, growth, and the type of environment they're looking for.
+- Length: 4-5 sentences.
+
 Structure your output exactly as follows:
 # [Full Name]
 ## Summary
-[Tailored 2-3 sentence professional summary grounded in the CV]
+[Tailored summary following the summary rules above, drawing from the CV and candidate preferences]
 ## Experience
-[Experience entries reordered/re-emphasised to lead with most relevant roles and bullets]
+[Experience entries remain in chronological order — reorder and re-emphasise bullets within each role to lead with those most relevant to the job]
 ## Skills
-[Skills reordered to lead with those matching high-emphasis requirements]
+[Skills reordered and grouped to lead with those matching high-emphasis requirements]
+## Projects
+[Project entries reordered/re-emphasised to lead with most relevant bullets]
 ## Education
 [Education section unchanged]"""
 

@@ -15,6 +15,7 @@ ssm = boto3.client('ssm', region_name='us-east-1')
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('companies')
+profiles_table = dynamodb.Table('candidate_profiles')
 
 def is_research_needed(company_name):
     response = table.get_item(Key={'company_name': company_name})
@@ -40,7 +41,12 @@ def increment_job_count(company_name):
         ExpressionAttributeValues={':inc': 1}
     )
 
-def build_prompt(company_name, company_location, job_title):
+def get_preferences():
+    profile = profiles_table.get_item(Key={'profile_id': 'primary'}).get('Item', {})
+    return profile.get('preferences', {})
+
+def build_prompt(company_name, company_location, job_title, preferences):
+    prefs_lines = "\n".join(f"  {k}: {v}" for k, v in preferences.items()) if preferences else ""
     return f"""
 <company>
   name: {company_name}
@@ -52,11 +58,7 @@ def build_prompt(company_name, company_location, job_title):
 </role>
 
 <candidate_preferences>
-  work_style: remote, hybrid
-  company_size: startup, mid-size
-  culture: engineering-driven, collaborative
-  role_focus: individual contributor
-  additional_preferences: Strong mentorship opportunities, new technologies, encourages innovation and curiousity
+{prefs_lines}
 </candidate_preferences>
 """
 
@@ -122,7 +124,8 @@ def lambda_handler(event, context):
         api_key = get_parameter('anthropic-api-key')
         client = anthropic.Anthropic(api_key=api_key, max_retries=8)
 
-        user_prompt = build_prompt(company_name, company_location, job_title)
+        preferences = get_preferences()
+        user_prompt = build_prompt(company_name, company_location, job_title, preferences)
 
         api_kwargs = dict(
             model="claude-sonnet-4-6",

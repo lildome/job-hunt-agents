@@ -43,6 +43,20 @@ like LangChain or CrewAI.
   dependency and architecture issues.
 **Alternatives considered:** EC2, ECS, Lambda zip packages with layers
 
+### [Post-build] — Candidate preferences moved to DynamoDB
+**What:** Candidate preferences (work style, company size, culture, role focus,
+  additional preferences) were hardcoded in company-researcher's prompt builder.
+  They are now stored as a `preferences` field on the `primary` record in the
+  `candidate_profiles` table and fetched at runtime by both company-researcher
+  and resume-tailor.
+**Why:** Hardcoded preferences meant updating them required a code change,
+  a Docker rebuild, and a Lambda deploy. Storing them in DynamoDB makes them
+  editable without touching code, and establishes `candidate_profiles` as the
+  single source of truth for all candidate data — CV, summary, preferences,
+  and projects all live in one record.
+**Alternatives considered:** SSM Parameter Store (overkill for structured
+  data), separate DynamoDB table (unnecessary for a single candidate tool)
+
 ### [Pre-build] — Secrets management
 **What:** AWS SSM Parameter Store (Standard tier)
 **Why:** Free tier sufficient for static API keys. Secrets Manager adds 

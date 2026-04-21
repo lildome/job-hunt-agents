@@ -33,11 +33,11 @@ def response(status_code, body):
 def validate_token(headers):
     token = (headers or {}).get('X-Session-Token') or (headers or {}).get('x-session-token')
     if not token:
-        return False
+        return 'absent'
     item = sessions_table.get_item(Key={'token': token}).get('Item')
-    if not item:
-        return False
-    return int(item.get('expires_at', 0)) > int(time.time())
+    if not item or int(item.get('expires_at', 0)) <= int(time.time()):
+        return 'invalid'
+    return 'valid'
 
 def post_auth(body):
     try:
@@ -63,7 +63,10 @@ def invoke_lambda(function_name, payload):
     )
     return json.loads(result['Payload'].read())
 
-def get_jobs(event):
+def get_jobs(event, auth):
+    if auth == 'invalid':
+        return response(401, {'error': 'Unauthorized'})
+
     params = event.get('queryStringParameters') or {}
     status_filter = params.get('status')
     min_score = params.get('min_score')
@@ -74,7 +77,7 @@ def get_jobs(event):
     if status_filter:
         items = [i for i in items if i.get('status') == status_filter]
 
-    if min_score:
+    if min_score and auth == 'valid':
         try:
             threshold = int(min_score)
             items = [i for i in items if int(i.get('match_score', 0)) >= threshold]
@@ -95,15 +98,30 @@ def get_jobs(event):
         for i in items
     ]
     jobs.sort(key=lambda x: int(x.get('match_score') or 0), reverse=True)
+
+    if auth == 'absent':
+        for job in jobs:
+            job.pop('match_score', None)
+            job.pop('match_summary', None)
+
     return response(200, jobs)
 
-def get_job(job_id):
+def get_job(job_id, auth):
+    if auth == 'invalid':
+        return response(401, {'error': 'Unauthorized'})
+
     job = jobs_table.get_item(Key={'id': job_id}).get('Item')
     if not job:
         return response(404, {'error': f'Job {job_id} not found'})
 
     company_name = job.get('company', '')
     company = companies_table.get_item(Key={'company_name': company_name}).get('Item', {})
+
+    if auth == 'absent':
+        for field in ('match_score', 'match_summary', 'tailored_resume', 'cover_letter'):
+            job.pop(field, None)
+        for field in ('candidate_fit_score', 'candidate_fit_reasoning'):
+            company.pop(field, None)
 
     return response(200, {'job': job, 'company': company})
 
@@ -194,18 +212,20 @@ def lambda_handler(event, context):
     if method == 'POST' and path == '/auth':
         return post_auth(body)
 
-    # All other routes require a valid session token
-    if not validate_token(headers):
-        return response(401, {'error': 'Unauthorized'})
+    auth = validate_token(headers)
 
     # GET /jobs
     if method == 'GET' and path == '/jobs':
-        return get_jobs(event)
+        return get_jobs(event, auth)
 
     # GET /jobs/{id}
     m = re.match(r'^/jobs/([^/]+)$', path)
     if m and method == 'GET':
-        return get_job(m.group(1))
+        return get_job(m.group(1), auth)
+
+    # Write/action routes — require valid token
+    if auth != 'valid':
+        return response(401, {'error': 'Unauthorized'})
 
     # PUT /jobs/{id}/status
     m = re.match(r'^/jobs/([^/]+)/status$', path)

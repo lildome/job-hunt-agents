@@ -1,115 +1,373 @@
+import base64
+import copy
 import json
 import logging
+import re
+from dataclasses import dataclass, field
+
 import boto3
 import anthropic
+
+from prompts import TAILOR_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT
+from measure import simulate_wrap, is_orphan, describe_orphan
+from renderer import render_pdf, get_bullet_layout_params, get_summary_layout_params
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-ssm = boto3.client('ssm', region_name='us-east-1')
-dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-jobs_table = dynamodb.Table('jobs')
-companies_table = dynamodb.Table('companies')
-profiles_table = dynamodb.Table('candidate_profiles')
+ssm = boto3.client("ssm", region_name="us-east-1")
+dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+jobs_table = dynamodb.Table("jobs")
+companies_table = dynamodb.Table("companies")
+profiles_table = dynamodb.Table("candidate_profiles")
 
-def get_parameter(name):
-    return ssm.get_parameter(Name=name, WithDecryption=True)['Parameter']['Value']
 
-api_key = get_parameter('anthropic-api-key')
+def _get_parameter(name):
+    return ssm.get_parameter(Name=name, WithDecryption=True)["Parameter"]["Value"]
+
+
+api_key = _get_parameter("anthropic-api-key")
 anthropic_client = anthropic.Anthropic(api_key=api_key)
 
-SYSTEM_PROMPT = """You are an expert CV writer helping tailor a candidate's resume for a specific job application.
 
-CRITICAL RULES:
-- You may ONLY use achievements, experiences, and skills that appear in the provided CV.
-- Do NOT invent, infer, or hallucinate any content not present in the CV.
-- You may reorder, re-emphasise, and reword existing content to better match the job.
-- Weight your emphasis toward requirements marked as 'high', then 'mid', then 'low'.
-- Output a complete tailored resume in clean markdown.
+# ─── Schema validation ────────────────────────────────────────────────────────
 
-SUMMARY RULES:
-- Write in a direct, confident, and human voice using first person.
-- Avoid buzzwords, superlatives, and vague claims — every sentence must be grounded in something specific from the CV.
-- Do not write like a recruiter — write like the candidate describing themselves plainly.
-- Weave in a natural signal from the candidate's preferences, particularly around learning, growth, and the type of environment they're looking for.
-- Length: 4-5 sentences.
+def _validate_resume(data: dict) -> None:
+    for key in ("name", "contact", "summary", "experience", "skills", "education", "projects"):
+        if key not in data:
+            raise ValueError(f"Resume JSON missing required field: {key}")
 
-Structure your output exactly as follows:
-# [Full Name]
-## Summary
-[Tailored summary following the summary rules above, drawing from the CV and candidate preferences]
-## Experience
-[Experience entries remain in chronological order — reorder and re-emphasise bullets within each role to lead with those most relevant to the job]
-## Skills
-[Skills reordered and grouped to lead with those matching high-emphasis requirements]
-## Projects
-[Project entries reordered/re-emphasised to lead with most relevant bullets]
-## Education
-[Education section unchanged]"""
+    for f in ("location", "phone", "email", "linkedin", "github"):
+        if f not in data["contact"]:
+            raise ValueError(f"Resume contact missing field: {f}")
 
-def build_prompt(job: dict, company: dict, cv: dict) -> str:
-    preferences = cv.get('preferences', {})
-    preferences_block = ""
+    for i, job in enumerate(data["experience"]):
+        for f in ("company", "role", "period", "bullets"):
+            if f not in job:
+                raise ValueError(f"experience[{i}] missing field: {f}")
+
+    for i, sg in enumerate(data["skills"]):
+        for f in ("category", "items"):
+            if f not in sg:
+                raise ValueError(f"skills[{i}] missing field: {f}")
+
+    for f in ("institution", "year", "degrees"):
+        if f not in data["education"]:
+            raise ValueError(f"education missing field: {f}")
+
+    for i, proj in enumerate(data["projects"]):
+        for f in ("title", "subtitle", "bullets"):
+            if f not in proj:
+                raise ValueError(f"projects[{i}] missing field: {f}")
+
+
+# ─── Prompt builders ─────────────────────────────────────────────────────────
+
+def _build_tailor_user_prompt(job: dict, company: dict, cv: dict) -> str:
+    preferences = cv.get("preferences", {})
+    pref_block = ""
     if preferences:
-        preferences_block = f"""
-<candidate_preferences>
-{json.dumps(preferences, indent=2)}
-</candidate_preferences>
-"""
+        pref_block = f"\n<candidate_preferences>\n{json.dumps(preferences, indent=2)}\n</candidate_preferences>\n"
 
-    return f"""
-<job_summary>
-{json.dumps(job.get('summary', {}), indent=2)}
-</job_summary>
+    return (
+        f"<job_summary>\n{json.dumps(job.get('summary', {}), indent=2)}\n</job_summary>\n\n"
+        f"<company_context>\n"
+        f"culture_notes: {json.dumps(company.get('culture_notes', []))}\n"
+        f"candidate_fit_reasoning: {company.get('candidate_fit_reasoning', 'N/A')}\n"
+        f"</company_context>\n"
+        f"{pref_block}"
+        f"<candidate_cv>\n{json.dumps(cv, indent=2)}\n</candidate_cv>"
+    )
 
-<company_context>
-culture_notes: {json.dumps(company.get('culture_notes', []))}
-candidate_fit_reasoning: {company.get('candidate_fit_reasoning', 'N/A')}
-</company_context>
-{preferences_block}
-<candidate_cv>
-{json.dumps(cv, indent=2)}
-</candidate_cv>
-"""
+
+def _build_repair_user_prompt(
+    job: dict,
+    company: dict,
+    cv: dict,
+    resume: dict,
+    orphans: list["OrphanReport"],
+) -> str:
+    context = _build_tailor_user_prompt(job, company, cv)
+
+    # Group orphans by section key so we can show full section context
+    orphan_by_path = {o.path: o for o in orphans}
+
+    # Collect sections that have at least one orphan
+    sections: dict[str, list["OrphanReport"]] = {}
+    for o in orphans:
+        if o.path == "summary":
+            sections.setdefault("summary", []).append(o)
+        else:
+            m = re.match(r"^(experience|projects)\[(\d+)\]", o.path)
+            if m:
+                section_key = f"{m.group(1)}[{m.group(2)}]"
+                sections.setdefault(section_key, []).append(o)
+
+    blocks = []
+    for section_key, section_orphans in sections.items():
+        if section_key == "summary":
+            o = section_orphans[0]
+            header = "Section: summary"
+            body = f'  {resume["summary"]}'
+            if o.path in orphan_by_path:
+                body += f"  [FLAGGED - orphan: {o.metric_description}]"
+            paths_line = "Paths to repair: summary"
+            blocks.append(f"{header}\n{body}\n{paths_line}")
+        else:
+            m = re.match(r"^(experience|projects)\[(\d+)\]$", section_key)
+            if not m:
+                continue
+            section_name, idx_str = m.group(1), m.group(2)
+            idx = int(idx_str)
+            entry = resume[section_name][idx]
+
+            if section_name == "experience":
+                label = f"{entry['company']}, {entry['role']}"
+            else:
+                label = f"{entry['title']}"
+
+            header = f"Section: {section_key}.bullets ({label})"
+            bullet_lines = []
+            orphaned_paths = []
+            for j, b in enumerate(entry["bullets"]):
+                path = f"{section_name}[{idx}].bullets[{j}]"
+                flag = ""
+                if path in orphan_by_path:
+                    flag = f"  [FLAGGED - orphan: {orphan_by_path[path].metric_description}]"
+                    orphaned_paths.append(path)
+                bullet_lines.append(f"  [{j}] {b}{flag}")
+
+            paths_line = "Paths to repair: " + ", ".join(orphaned_paths)
+            blocks.append(header + "\n" + "\n".join(bullet_lines) + "\n" + paths_line)
+
+    repair_sections = "\n\n".join(blocks)
+    return f"{context}\n\n<items_to_repair>\n{repair_sections}\n</items_to_repair>"
+
+
+# ─── Orphan detection ─────────────────────────────────────────────────────────
+
+@dataclass
+class OrphanReport:
+    path: str
+    lines: list[str] = field(repr=False)
+    metric_description: str
+
+
+def _detect_orphans(resume: dict) -> list[OrphanReport]:
+    orphans: list[OrphanReport] = []
+    bullet_params = get_bullet_layout_params()
+    summary_params = get_summary_layout_params()
+
+    # Keys for is_orphan / describe_orphan (no hanging_indent)
+    bullet_measure = {k: v for k, v in bullet_params.items() if k != "hanging_indent"}
+    summary_measure = {k: v for k, v in summary_params.items() if k != "hanging_indent"}
+
+    # Summary
+    lines = simulate_wrap(resume["summary"], **summary_params)
+    if is_orphan(lines, **summary_measure):
+        orphans.append(OrphanReport(
+            path="summary",
+            lines=lines,
+            metric_description=describe_orphan(lines, **summary_measure),
+        ))
+
+    # Experience bullets
+    for i, job in enumerate(resume["experience"]):
+        for j, bullet in enumerate(job["bullets"]):
+            text = "•\xa0\xa0" + bullet
+            lines = simulate_wrap(text, **bullet_params)
+            if is_orphan(lines, **bullet_measure):
+                orphans.append(OrphanReport(
+                    path=f"experience[{i}].bullets[{j}]",
+                    lines=lines,
+                    metric_description=describe_orphan(lines, **bullet_measure),
+                ))
+
+    # Project bullets
+    for i, proj in enumerate(resume["projects"]):
+        for j, bullet in enumerate(proj["bullets"]):
+            text = "•\xa0\xa0" + bullet
+            lines = simulate_wrap(text, **bullet_params)
+            if is_orphan(lines, **bullet_measure):
+                orphans.append(OrphanReport(
+                    path=f"projects[{i}].bullets[{j}]",
+                    lines=lines,
+                    metric_description=describe_orphan(lines, **bullet_measure),
+                ))
+
+    return orphans
+
+
+# ─── Repair application ───────────────────────────────────────────────────────
+
+_BULLET_PATH_RE = re.compile(r"^(experience|projects)\[(\d+)\]\.bullets\[(\d+)\]$")
+
+
+def apply_repairs(resume: dict, repairs: list[dict]) -> dict:
+    """Apply each {path, text} repair to a deep copy of resume."""
+    result = copy.deepcopy(resume)
+    for repair in repairs:
+        path = repair.get("path", "")
+        text = repair.get("text", "")
+        if path == "summary":
+            result["summary"] = text
+            continue
+        m = _BULLET_PATH_RE.match(path)
+        if m:
+            section, idx, bidx = m.group(1), int(m.group(2)), int(m.group(3))
+            try:
+                result[section][idx]["bullets"][bidx] = text
+            except (IndexError, KeyError):
+                logger.warning("Repair path %s out of bounds, skipping", path)
+        else:
+            logger.warning("Unknown repair path %s, skipping", path)
+    return result
+
+
+# ─── Markdown renderer (backward compat) ─────────────────────────────────────
+
+def render_markdown(resume: dict) -> str:
+    lines = [f"# {resume['name']}", ""]
+
+    contact = resume["contact"]
+    parts = [v.strip() for v in [
+        contact.get("location", ""), contact.get("phone", ""),
+        contact.get("email", ""), contact.get("linkedin", ""),
+        contact.get("github", ""),
+    ] if v.strip()]
+    lines += [" · ".join(parts), ""]
+
+    lines += ["## Summary", resume["summary"], ""]
+
+    lines.append("## Experience")
+    for job in resume["experience"]:
+        lines.append(f"### {job['company']} — {job['role']} ({job['period']})")
+        for b in job["bullets"]:
+            lines.append(f"- {b}")
+        lines.append("")
+
+    lines.append("## Skills")
+    for sg in resume["skills"]:
+        lines.append(f"**{sg['category']}**: {', '.join(sg['items'])}")
+    lines.append("")
+
+    lines.append("## Projects")
+    for proj in resume["projects"]:
+        lines.append(f"### {proj['title']} — {proj['subtitle']}")
+        for b in proj["bullets"]:
+            lines.append(f"- {b}")
+        lines.append("")
+
+    lines.append("## Education")
+    edu = resume["education"]
+    lines.append(f"**{edu['institution']}** ({edu['year']})")
+    for degree in edu["degrees"]:
+        lines.append(f"- {degree}")
+
+    return "\n".join(lines)
+
+
+# ─── LLM helpers ─────────────────────────────────────────────────────────────
+
+def _llm_call(system: str, user: str, max_tokens: int = 4096) -> str:
+    response = anthropic_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    raise ValueError("LLM returned no text block")
+
+
+def _parse_json(raw: str, label: str) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON parse failure in {label}: {e}\nRaw output:\n{raw}") from e
+
+
+# ─── Lambda entry point ───────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
-    job_id = event['job_id']
-    logger.info(f"Tailoring resume for job_id: {job_id}")
+    job_id = event["job_id"]
+    logger.info("Tailoring resume for job_id: %s", job_id)
 
-    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    # Load data from DynamoDB
+    job = jobs_table.get_item(Key={"id": job_id}).get("Item")
     if not job:
         raise ValueError(f"Job {job_id} not found")
-    if 'summary' not in job:
+    if "summary" not in job:
         raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
 
     company = companies_table.get_item(
-        Key={'company_name': job.get('company', '')}
-    ).get('Item', {})
+        Key={"company_name": job.get("company", "")}
+    ).get("Item", {})
 
-    cv = profiles_table.get_item(
-        Key={'profile_id': 'primary'}
-    ).get('Item', {})
+    cv = profiles_table.get_item(Key={"profile_id": "primary"}).get("Item", {})
 
-    user_prompt = build_prompt(job, company, cv)
+    # Pass 1: tailor
+    logger.info("Pass 1: tailoring resume")
+    tailor_user = _build_tailor_user_prompt(job, company, cv)
+    raw_json = _llm_call(TAILOR_SYSTEM_PROMPT, tailor_user)
+    resume_data = _parse_json(raw_json, "tailor pass")
+    _validate_resume(resume_data)
+    logger.info("Pass 1 complete — schema valid")
 
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=3000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}]
-    )
+    # Pass 2: detect orphans
+    orphans = _detect_orphans(resume_data)
+    if orphans:
+        logger.info("Pass 2: %d orphan(s) detected: %s",
+                    len(orphans), [o.path for o in orphans])
+    else:
+        logger.info("Pass 2: no orphans detected")
 
-    tailored_resume = ""
-    for block in response.content:
-        if block.type == "text":
-            tailored_resume += block.text
-            break
+    # Pass 3: repair (only if orphans found)
+    if orphans:
+        repair_user = _build_repair_user_prompt(job, company, cv, resume_data, orphans)
+        raw_repairs = _llm_call(REPAIR_SYSTEM_PROMPT, repair_user, max_tokens=2048)
+        repairs_data = _parse_json(raw_repairs, "repair pass")
+        repairs = repairs_data.get("repairs", [])
+        resume_data = apply_repairs(resume_data, repairs)
+        logger.info("Pass 3: applied %d repair(s)", len(repairs))
 
+    # Pass 4: final render
+    pdf_bytes = render_pdf(resume_data)
+
+    # Check for remaining orphans (warn only — do not block)
+    remaining = _detect_orphans(resume_data)
+    if remaining:
+        logger.warning(
+            "Remaining orphan(s) after repair pass: %s",
+            [o.path for o in remaining],
+        )
+
+    # Build outputs
+    markdown = render_markdown(resume_data)
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+    # Write to DynamoDB
     jobs_table.update_item(
-        Key={'id': job_id},
-        UpdateExpression="SET tailored_resume = :resume",
-        ExpressionAttributeValues={':resume': tailored_resume}
+        Key={"id": job_id},
+        UpdateExpression=(
+            "SET tailored_resume = :md, "
+            "tailored_resume_data = :data, "
+            "tailored_resume_pdf = :pdf"
+        ),
+        ExpressionAttributeValues={
+            ":md": markdown,
+            ":data": resume_data,
+            ":pdf": pdf_b64,
+        },
     )
 
-    logger.info(f"Resume tailored for job_id: {job_id}")
-    return {"job_id": job_id, "tailored_resume": tailored_resume}
+    logger.info("Resume tailored and stored for job_id: %s", job_id)
+
+    return {
+        "job_id": job_id,
+        "tailored_resume": markdown,
+        "tailored_resume_data": resume_data,
+        "tailored_resume_pdf": pdf_b64,
+    }

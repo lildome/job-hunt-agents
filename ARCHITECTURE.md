@@ -278,6 +278,11 @@ like LangChain or CrewAI.
 **Why:** Removes the manual ECR login → docker build → Lambda update cycle on every code change. Path-based filtering keeps the pipeline fast — touching only `cv-matcher/` rebuilds just that function, not all eight.
 **Alternatives considered:** Separate per-function workflows (more files, harder to maintain); rebuild all functions on every push (wasteful, ~8× slower); AWS CodePipeline (adds infra complexity for no benefit at single-user scale).
 
+### [Post-build] — resume-tailor: structured JSON output, PDF rendering, orphan repair
+**What:** Rewrote `resume-tailor` Lambda to produce structured JSON (`tailored_resume_data`) instead of raw markdown, render that JSON to a single-page PDF (`tailored_resume_pdf`) using ReportLab, and run an orphan-detection + LLM repair pass before final render. Backward compatibility preserved — `tailored_resume` (markdown) is still written, derived from the JSON. Four new files: `renderer.py` (ReportLab layout), `measure.py` (word-wrap simulator + orphan detection), `prompts.py` (system prompts extracted), and the rewritten `handler.py`.
+**Why:** Markdown output was dashboard-only; a PDF is needed for actual job applications. Orphan detection prevents single-word dangling lines that look unprofessional. Structured JSON enables downstream consumers (future S3 upload, UI preview) to work with the data without parsing markdown.
+**Alternatives considered:** WeasyPrint / wkhtmltopdf for HTML-to-PDF (heavier dependencies, harder to control exact layout); pure server-side markdown (no PDF); skipping orphan detection (PDF quality would depend entirely on LLM luck).
+
 ## Deferred / Planned
 
 - LinkedIn scraper implementation

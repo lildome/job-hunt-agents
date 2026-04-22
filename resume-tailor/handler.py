@@ -282,11 +282,45 @@ def _llm_call(system: str, user: str, max_tokens: int = 4096) -> str:
     raise ValueError("LLM returned no text block")
 
 
-def _parse_json(raw: str, label: str) -> dict:
+def _parse_json(raw: str, label: str):
+    """Parse a JSON response from the LLM, tolerating common formatting issues.
+
+    Handles three known LLM output quirks:
+    1. Markdown code fence wrapping (```json ... ```)
+    2. Preamble or postamble text outside the JSON object
+    3. Unescaped control characters (newlines, tabs) inside string values
+
+    Fail fast: raises ValueError with full raw output if the normalised text
+    still can't be parsed. Does NOT retry the LLM call.
+    """
+    text = raw.strip()
+
+    # Strip opening markdown code fence if present
+    if text.startswith("```"):
+        # Drop everything up to and including the first newline ("```json\n" or just "```\n")
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+
+    # Strip closing markdown code fence if present
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0].rstrip()
+
+    # Find the JSON object boundaries — strips any preamble or trailing commentary
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(
+            f"JSON parse failure in {label}: no JSON object found in output\n"
+            f"Raw output:\n{raw}"
+        )
+    text = text[start:end + 1]
+
+    # strict=False tolerates unescaped control characters inside string values
     try:
-        return json.loads(raw)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse failure in {label}: {e}\nRaw output:\n{raw}") from e
+        raise ValueError(
+            f"JSON parse failure in {label}: {e}\nRaw output:\n{raw}"
+        ) from e
 
 
 # ─── Lambda entry point ───────────────────────────────────────────────────────

@@ -3,15 +3,19 @@ import logging
 import re
 import secrets
 import time
+from datetime import datetime, timezone, timedelta
 import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 PIN = "Job Hunt PIN 159075"
+S3_BUCKET = "dprofico-job-hunt-artifacts"
+STALE_THRESHOLD = timedelta(minutes=5)
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 lambda_client = boto3.client('lambda', region_name='us-east-1')
+s3_client = boto3.client('s3', region_name='us-east-1')
 jobs_table = dynamodb.Table('jobs')
 companies_table = dynamodb.Table('companies')
 sessions_table = dynamodb.Table('sessions')
@@ -54,6 +58,37 @@ def post_auth(body):
     sessions_table.put_item(Item={'token': token, 'expires_at': expires_at})
     logger.info("New session created")
     return response(200, {'token': token})
+
+def _build_generation_status(job: dict, prefix: str) -> dict:
+    status = job.get(f'{prefix}_status', 'none')
+    started_at = job.get(f'{prefix}_started_at')
+    error = job.get(f'{prefix}_error')
+    pdf_key = job.get(f'{prefix}_pdf_key')
+
+    if status == 'generating' and started_at:
+        try:
+            started = datetime.fromisoformat(started_at)
+            if datetime.now(timezone.utc) - started > STALE_THRESHOLD:
+                status = 'failed'
+                error = error or 'Generation appears to have timed out'
+        except ValueError:
+            pass
+
+    pdf_url = None
+    if status == 'done' and pdf_key:
+        pdf_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': pdf_key},
+            ExpiresIn=86400,
+        )
+
+    return {
+        'status': status,
+        'pdf_url': pdf_url,
+        'started_at': started_at,
+        'error': error if status == 'failed' else None,
+    }
+
 
 def invoke_lambda(function_name, payload):
     result = lambda_client.invoke(
@@ -123,7 +158,12 @@ def get_job(job_id, auth):
         for field in ('candidate_fit_score', 'candidate_fit_reasoning'):
             company.pop(field, None)
 
-    return response(200, {'job': job, 'company': company})
+    return response(200, {
+        'job': job,
+        'company': company,
+        'resume': _build_generation_status(job, 'tailored_resume'),
+        'cover_letter': _build_generation_status(job, 'cover_letter'),
+    })
 
 def update_job_status(job_id, body):
     try:
@@ -174,10 +214,12 @@ def start_scrape(body):
     return response(202, {'message': 'Scrape started', 'run_input': run_input})
 
 def tailor_resume(job_id):
-    result = invoke_lambda('resume-tailor', {'job_id': job_id})
-    if 'errorMessage' in result:
-        return response(500, {'error': result['errorMessage']})
-    return response(200, result)
+    lambda_client.invoke(
+        FunctionName='resume-tailor',
+        InvocationType='Event',
+        Payload=json.dumps({'job_id': job_id}).encode()
+    )
+    return response(202, {'status': 'generating'})
 
 def generate_cover_letter(job_id, body):
     try:
@@ -185,16 +227,38 @@ def generate_cover_letter(job_id, body):
     except json.JSONDecodeError:
         return response(400, {'error': 'Invalid JSON body'})
 
+    mode = data.get('mode', 'autonomous')
     payload = {
         'job_id': job_id,
-        'mode': data.get('mode', 'autonomous'),
+        'mode': mode,
         'feedback': data.get('feedback'),
         'conversation_history': data.get('conversation_history', [])
     }
-    result = invoke_lambda('cover-letter-generator', payload)
-    if 'errorMessage' in result:
-        return response(500, {'error': result['errorMessage']})
-    return response(200, result)
+
+    if mode == 'guided':
+        result = invoke_lambda('cover-letter-generator', payload)
+        if 'errorMessage' in result:
+            return response(500, {'error': result['errorMessage']})
+        return response(200, result)
+
+    # autonomous — fire-and-forget
+    lambda_client.invoke(
+        FunctionName='cover-letter-generator',
+        InvocationType='Event',
+        Payload=json.dumps(payload).encode()
+    )
+    return response(202, {'status': 'generating'})
+
+def get_generation_status(job_id):
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    return response(200, {
+        'resume': _build_generation_status(job, 'tailored_resume'),
+        'cover_letter': _build_generation_status(job, 'cover_letter'),
+    })
+
 
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
@@ -222,6 +286,11 @@ def lambda_handler(event, context):
     m = re.match(r'^/jobs/([^/]+)$', path)
     if m and method == 'GET':
         return get_job(m.group(1), auth)
+
+    # GET /jobs/{id}/generation-status — no auth required
+    m = re.match(r'^/jobs/([^/]+)/generation-status$', path)
+    if m and method == 'GET':
+        return get_generation_status(m.group(1))
 
     # Write/action routes — require valid token
     if auth != 'valid':

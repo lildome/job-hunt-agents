@@ -342,7 +342,7 @@ def _upload_to_s3(job_id: str, pdf_bytes: bytes, filename: str) -> str:
     return key
 
 
-def _generate_presigned_url(key: str, expires_in: int = 3600) -> str:
+def _generate_presigned_url(key: str, expires_in: int = 86400) -> str:
     """Generate a time-limited URL for fetching an S3 object."""
     return s3_client.generate_presigned_url(
         'get_object',
@@ -356,79 +356,105 @@ def lambda_handler(event, context):
     job_id = event["job_id"]
     logger.info("Tailoring resume for job_id: %s", job_id)
 
-    # Load data from DynamoDB
-    job = jobs_table.get_item(Key={"id": job_id}).get("Item")
-    if not job:
-        raise ValueError(f"Job {job_id} not found")
-    if "summary" not in job:
-        raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
-
-    company = companies_table.get_item(
-        Key={"company_name": job.get("company", "")}
-    ).get("Item", {})
-
-    cv = profiles_table.get_item(Key={"profile_id": "primary"}).get("Item", {})
-
-    # Pass 1: tailor
-    logger.info("Pass 1: tailoring resume")
-    tailor_user = _build_tailor_user_prompt(job, company, cv)
-    raw_json = _llm_call(TAILOR_SYSTEM_PROMPT, tailor_user)
-    resume_data = _parse_json(raw_json, "tailor pass")
-    _validate_resume(resume_data)
-    logger.info("Pass 1 complete — schema valid")
-
-    # Pass 2: detect orphans
-    orphans = _detect_orphans(resume_data)
-    if orphans:
-        logger.info("Pass 2: %d orphan(s) detected: %s",
-                    len(orphans), [o.path for o in orphans])
-    else:
-        logger.info("Pass 2: no orphans detected")
-
-    # Pass 3: repair (only if orphans found)
-    if orphans:
-        repair_user = _build_repair_user_prompt(job, company, cv, resume_data, orphans)
-        raw_repairs = _llm_call(REPAIR_SYSTEM_PROMPT, repair_user, max_tokens=2048)
-        repairs_data = _parse_json(raw_repairs, "repair pass")
-        repairs = repairs_data.get("repairs", [])
-        resume_data = apply_repairs(resume_data, repairs)
-        logger.info("Pass 3: applied %d repair(s)", len(repairs))
-
-    # Pass 4: final render
-    pdf_bytes = render_pdf(resume_data)
-
-    # Check for remaining orphans (warn only — do not block)
-    remaining = _detect_orphans(resume_data)
-    if remaining:
-        logger.warning(
-            "Remaining orphan(s) after repair pass: %s",
-            [o.path for o in remaining],
-        )
-
-    # Build outputs
-    markdown = render_markdown(resume_data)
-
-    #upload PDF to S3 and get presigned URL
-    role = job.get("positionName", "")
-    company_name = job.get("company", "")
-    filename = build_filename(company_name, role)
-    s3_key = _upload_to_s3(job_id, pdf_bytes, filename)
-
-    url = _generate_presigned_url(s3_key)
     jobs_table.update_item(
         Key={'id': job_id},
-        UpdateExpression="SET tailored_resume_data = :data, tailored_resume = :md, tailored_resume_pdf_key = :key",
+        UpdateExpression="SET tailored_resume_status = :s, tailored_resume_started_at = :t REMOVE tailored_resume_error",
         ExpressionAttributeValues={
-            ':data': resume_data,
-            ':md': markdown,
-            ':key': s3_key,
+            ':s': 'generating',
+            ':t': datetime.now(timezone.utc).isoformat(),
         }
     )
 
-    logger.info("Resume tailored and stored for job_id: %s", job_id)
+    try:
+        # Load data from DynamoDB
+        job = jobs_table.get_item(Key={"id": job_id}).get("Item")
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+        if "summary" not in job:
+            raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
 
-    return {
-        "job_id": job_id,
-        "tailored_resume": markdown,
-        "tailored_resume_pdf_url": url,
-    }
+        company = companies_table.get_item(
+            Key={"company_name": job.get("company", "")}
+        ).get("Item", {})
+
+        cv = profiles_table.get_item(Key={"profile_id": "primary"}).get("Item", {})
+
+        # Pass 1: tailor
+        logger.info("Pass 1: tailoring resume")
+        tailor_user = _build_tailor_user_prompt(job, company, cv)
+        raw_json = _llm_call(TAILOR_SYSTEM_PROMPT, tailor_user)
+        resume_data = _parse_json(raw_json, "tailor pass")
+        _validate_resume(resume_data)
+        logger.info("Pass 1 complete — schema valid")
+
+        # Pass 2: detect orphans
+        orphans = _detect_orphans(resume_data)
+        if orphans:
+            logger.info("Pass 2: %d orphan(s) detected: %s",
+                        len(orphans), [o.path for o in orphans])
+        else:
+            logger.info("Pass 2: no orphans detected")
+
+        # Pass 3: repair (only if orphans found)
+        if orphans:
+            repair_user = _build_repair_user_prompt(job, company, cv, resume_data, orphans)
+            raw_repairs = _llm_call(REPAIR_SYSTEM_PROMPT, repair_user, max_tokens=2048)
+            repairs_data = _parse_json(raw_repairs, "repair pass")
+            repairs = repairs_data.get("repairs", [])
+            resume_data = apply_repairs(resume_data, repairs)
+            logger.info("Pass 3: applied %d repair(s)", len(repairs))
+
+        # Pass 4: final render
+        pdf_bytes = render_pdf(resume_data)
+
+        # Check for remaining orphans (warn only — do not block)
+        remaining = _detect_orphans(resume_data)
+        if remaining:
+            logger.warning(
+                "Remaining orphan(s) after repair pass: %s",
+                [o.path for o in remaining],
+            )
+
+        # Build outputs
+        markdown = render_markdown(resume_data)
+
+        # Upload PDF to S3
+        role = job.get("positionName", "")
+        company_name = job.get("company", "")
+        filename = build_filename(company_name, role)
+        s3_key = _upload_to_s3(job_id, pdf_bytes, filename)
+
+        url = _generate_presigned_url(s3_key)
+        jobs_table.update_item(
+            Key={'id': job_id},
+            UpdateExpression="SET tailored_resume_data = :data, tailored_resume = :md, tailored_resume_pdf_key = :key, tailored_resume_status = :s",
+            ExpressionAttributeValues={
+                ':data': resume_data,
+                ':md': markdown,
+                ':key': s3_key,
+                ':s': 'done',
+            }
+        )
+
+        logger.info("Resume tailored and stored for job_id: %s", job_id)
+
+        return {
+            "job_id": job_id,
+            "tailored_resume": markdown,
+            "tailored_resume_pdf_url": url,
+        }
+
+    except Exception as e:
+        logger.exception("resume-tailor failed for job_id %s", job_id)
+        try:
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression="SET tailored_resume_status = :s, tailored_resume_error = :e",
+                ExpressionAttributeValues={
+                    ':s': 'failed',
+                    ':e': str(e)[:500],
+                }
+            )
+        except Exception:
+            logger.exception("Failed to write failure status to DDB")
+        raise

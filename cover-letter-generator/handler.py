@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 import boto3
 import anthropic
 
@@ -109,53 +110,78 @@ def lambda_handler(event, context):
         }
 
     else:  # autonomous: draft → critique → revised final
-        initial_prompt = build_initial_prompt(job, company, cv)
-        messages = [{"role": "user", "content": initial_prompt}]
-
-        # Turn 1: initial draft
-        response1 = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=messages
-        )
-        draft1 = ""
-        for block in response1.content:
-            if block.type == "text":
-                draft1 += block.text
-                break
-
-        # Critique pass
-        job_title = job.get('summary', {}).get('job_title', job.get('positionName', ''))
-        critique = run_critique(draft1, job_title, company_name)
-
-        # Turn 2: revised final incorporating critique
-        messages2 = messages + [
-            {"role": "assistant", "content": draft1},
-            {"role": "user", "content": f"A hiring manager gave this critique:\n\n{critique}\n\nRevise the cover letter to address these points."}
-        ]
-        response2 = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=messages2
-        )
-        final_draft = ""
-        for block in response2.content:
-            if block.type == "text":
-                final_draft += block.text
-                break
-
         jobs_table.update_item(
             Key={'id': job_id},
-            UpdateExpression="SET cover_letter = :cl",
-            ExpressionAttributeValues={':cl': final_draft}
+            UpdateExpression="SET cover_letter_status = :s, cover_letter_started_at = :t REMOVE cover_letter_error",
+            ExpressionAttributeValues={
+                ':s': 'generating',
+                ':t': datetime.now(timezone.utc).isoformat(),
+            }
         )
 
-        logger.info(f"Autonomous cover letter generated for job_id: {job_id}")
-        return {
-            "job_id": job_id,
-            "mode": "autonomous",
-            "cover_letter": final_draft,
-            "critique": critique
-        }
+        try:
+            initial_prompt = build_initial_prompt(job, company, cv)
+            messages = [{"role": "user", "content": initial_prompt}]
+
+            # Turn 1: initial draft
+            response1 = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1500,
+                system=SYSTEM_PROMPT,
+                messages=messages
+            )
+            draft1 = ""
+            for block in response1.content:
+                if block.type == "text":
+                    draft1 += block.text
+                    break
+
+            # Critique pass
+            job_title = job.get('summary', {}).get('job_title', job.get('positionName', ''))
+            critique = run_critique(draft1, job_title, company_name)
+
+            # Turn 2: revised final incorporating critique
+            messages2 = messages + [
+                {"role": "assistant", "content": draft1},
+                {"role": "user", "content": f"A hiring manager gave this critique:\n\n{critique}\n\nRevise the cover letter to address these points."}
+            ]
+            response2 = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1500,
+                system=SYSTEM_PROMPT,
+                messages=messages2
+            )
+            final_draft = ""
+            for block in response2.content:
+                if block.type == "text":
+                    final_draft += block.text
+                    break
+
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression="SET cover_letter = :cl, cover_letter_status = :s",
+                ExpressionAttributeValues={':cl': final_draft, ':s': 'done'}
+            )
+
+            logger.info(f"Autonomous cover letter generated for job_id: {job_id}")
+            return {
+                "job_id": job_id,
+                "mode": "autonomous",
+                "cover_letter": final_draft,
+                "critique": critique
+            }
+
+        except Exception as e:
+            logger.exception("cover-letter-generator failed for job_id %s", job_id)
+            try:
+                jobs_table.update_item(
+                    Key={'id': job_id},
+                    UpdateExpression="SET cover_letter_status = :s, cover_letter_error = :e",
+                    ExpressionAttributeValues={
+                        ':s': 'failed',
+                        ':e': str(e)[:500],
+                    }
+                )
+            except Exception:
+                logger.exception("Failed to write failure status to DDB")
+            raise

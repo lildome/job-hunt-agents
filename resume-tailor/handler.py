@@ -1,8 +1,8 @@
-import base64
 import copy
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 import boto3
@@ -11,10 +11,14 @@ import anthropic
 from prompts import TAILOR_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT
 from measure import simulate_wrap, is_orphan, describe_orphan
 from renderer import render_pdf, get_bullet_layout_params, get_summary_layout_params
+from filename import build_filename
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+S3_BUCKET = "dprofico-job-hunt-artifacts"
+
+s3_client = boto3.client("s3", region_name="us-east-1")
 ssm = boto3.client("ssm", region_name="us-east-1")
 dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 jobs_table = dynamodb.Table("jobs")
@@ -321,7 +325,30 @@ def _parse_json(raw: str, label: str):
         raise ValueError(
             f"JSON parse failure in {label}: {e}\nRaw output:\n{raw}"
         ) from e
+    
+# ─── S3 Helpers ───────────────────────────────────────────────────────────────
 
+def _upload_to_s3(job_id: str, pdf_bytes: bytes, filename: str) -> str:
+    """Upload PDF bytes to S3. Returns the S3 object key."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    key = f"resumes/{job_id}/{timestamp}-{filename}"
+    s3_client.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=pdf_bytes,
+        ContentType='application/pdf',
+        ContentDisposition=f'attachment; filename="{filename}"',
+    )
+    return key
+
+
+def _generate_presigned_url(key: str, expires_in: int = 3600) -> str:
+    """Generate a time-limited URL for fetching an S3 object."""
+    return s3_client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': S3_BUCKET, 'Key': key},
+        ExpiresIn=expires_in,
+    )
 
 # ─── Lambda entry point ───────────────────────────────────────────────────────
 
@@ -380,21 +407,22 @@ def lambda_handler(event, context):
 
     # Build outputs
     markdown = render_markdown(resume_data)
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-    # Write to DynamoDB
+    #upload PDF to S3 and get presigned URL
+    role = job.get("positionName", "")
+    company_name = job.get("company", "")
+    filename = build_filename(company_name, role)
+    s3_key = _upload_to_s3(job_id, pdf_bytes, filename)
+
+    url = _generate_presigned_url(s3_key)
     jobs_table.update_item(
-        Key={"id": job_id},
-        UpdateExpression=(
-            "SET tailored_resume = :md, "
-            "tailored_resume_data = :data, "
-            "tailored_resume_pdf = :pdf"
-        ),
+        Key={'id': job_id},
+        UpdateExpression="SET tailored_resume_data = :data, tailored_resume = :md, tailored_resume_pdf_key = :key",
         ExpressionAttributeValues={
-            ":md": markdown,
-            ":data": resume_data,
-            ":pdf": pdf_b64,
-        },
+            ':data': resume_data,
+            ':md': markdown,
+            ':key': s3_key,
+        }
     )
 
     logger.info("Resume tailored and stored for job_id: %s", job_id)
@@ -402,6 +430,5 @@ def lambda_handler(event, context):
     return {
         "job_id": job_id,
         "tailored_resume": markdown,
-        "tailored_resume_data": resume_data,
-        "tailored_resume_pdf": pdf_b64,
+        "tailored_resume_pdf_url": url,
     }

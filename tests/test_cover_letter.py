@@ -4,8 +4,8 @@ Integration test for cover-letter-generator Lambda (autonomous mode).
 What it does:
   1. Inserts a test job with a pre-built summary into the jobs table
   2. Invokes cover-letter-generator Lambda in autonomous mode
-  3. Asserts cover_letter is written to jobs table and is non-empty
-  4. Asserts critique is returned in the Lambda response
+  3. Asserts cover_letter (markdown) is written to jobs table and is non-empty
+  4. Asserts cover_letter_data (JSON) and cover_letter_pdf_key are written to DDB
   5. Cleans up the test item
 
 Run from repo root:
@@ -61,8 +61,8 @@ def assert_results(job_id, result):
     # Check Lambda response fields
     if not result.get('cover_letter'):
         errors.append("cover_letter missing from Lambda response")
-    if not result.get('critique'):
-        errors.append("critique missing from Lambda response")
+    if not result.get('cover_letter_pdf_url'):
+        errors.append("cover_letter_pdf_url missing from Lambda response")
 
     # Check DynamoDB write
     item = jobs_table.get_item(Key={'id': job_id}).get('Item', {})
@@ -71,6 +71,13 @@ def assert_results(job_id, result):
         errors.append("cover_letter is missing or empty in DynamoDB")
     elif len(cover_letter) < 100:
         errors.append(f"cover_letter suspiciously short ({len(cover_letter)} chars)")
+
+    if not item.get('cover_letter_data'):
+        errors.append("cover_letter_data missing from DynamoDB")
+    if not item.get('cover_letter_pdf_key'):
+        errors.append("cover_letter_pdf_key missing from DynamoDB")
+    if item.get('cover_letter_status') != 'done':
+        errors.append(f"cover_letter_status is '{item.get('cover_letter_status')}', expected 'done'")
 
     return errors, item
 
@@ -100,7 +107,8 @@ def run():
         else:
             preview = item['cover_letter'][:300].replace('\n', ' ')
             print(f"  preview: {preview}...")
-            print(f"  critique: {str(result.get('critique', ''))[:150]}...")
+            print(f"  s3_key: {item.get('cover_letter_pdf_key', '')}")
+            print(f"  pdf_url: {result.get('cover_letter_pdf_url', '')[:80]}...")
             print("\nPASS")
 
     finally:

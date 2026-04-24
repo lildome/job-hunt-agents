@@ -135,7 +135,7 @@ def _upload_to_s3(job_id: str, pdf_bytes: bytes, filename: str) -> str:
         Key=key,
         Body=pdf_bytes,
         ContentType='application/pdf',
-        ContentDisposition=f'attachment; filename="{filename}"',
+        ContentDisposition=f'inline; filename="{filename}"',
     )
     return key
 

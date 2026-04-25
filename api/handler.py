@@ -19,6 +19,7 @@ s3_client = boto3.client('s3', region_name='us-east-1')
 jobs_table = dynamodb.Table('jobs')
 companies_table = dynamodb.Table('companies')
 sessions_table = dynamodb.Table('sessions')
+profiles_table = dynamodb.Table('candidate_profiles')
 
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -249,6 +250,19 @@ def generate_cover_letter(job_id, body):
     )
     return response(202, {'status': 'generating'})
 
+def get_profile():
+    try:
+        item = profiles_table.get_item(Key={'profile_id': 'primary'}).get('Item')
+        if not item:
+            return response(404, {'error': 'Profile not found'})
+        item.pop('profile_id', None)
+        item.pop('preferences', None)
+        return response(200, item)
+    except Exception as e:
+        logger.error(f"get_profile error: {e}")
+        return response(500, {'error': 'Internal server error'})
+
+
 def get_generation_status(job_id):
     job = jobs_table.get_item(Key={'id': job_id}).get('Item')
     if not job:
@@ -291,6 +305,10 @@ def lambda_handler(event, context):
     m = re.match(r'^/jobs/([^/]+)/generation-status$', path)
     if m and method == 'GET':
         return get_generation_status(m.group(1))
+
+    # GET /profile — no auth required
+    if method == 'GET' and path == '/profile':
+        return get_profile()
 
     # Write/action routes — require valid token
     if auth != 'valid':

@@ -9,13 +9,14 @@ CRITICAL CONTENT RULES:
 FIELDS YOU MAY MODIFY:
 - summary (rewrite per summary rules)
 - experience[].bullets (reorder, reword, re-emphasise)
-- skills (reorder categories and items to lead with job-relevant skills)
+- skills: reorder categories and reorder items within categories to lead with job-relevant ones. You may NOT add new skills, remove skills, or modify skill item names (no parentheticals, no expansions, no abbreviations). You may NOT move items between categories.
 - projects[].bullets (reorder, reword)
  
 FIELDS YOU MUST PRESERVE EXACTLY:
 - name, contact (all fields)
 - experience[].company, experience[].role, experience[].period
 - skills[].category labels (reorder, don't rename)
+- skills[].items (reorder within their category, but do not add, remove, modify, or move between categories)
 - education (all fields)
 - projects[].title, projects[].subtitle
  

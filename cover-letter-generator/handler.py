@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import boto3
 import anthropic
 
-from prompts import AUTONOMOUS_SYSTEM_PROMPT
+from prompts import AUTONOMOUS_SYSTEM_PROMPT, REVISION_INSTRUCTION
 from renderer import render_cover_letter_pdf
 from filename import build_filename
 
@@ -26,34 +26,6 @@ def get_parameter(name):
 api_key = get_parameter('anthropic-api-key')
 anthropic_client = anthropic.Anthropic(api_key=api_key)
 
-GUIDED_SYSTEM_PROMPT = """You are an expert cover letter writer. You write compelling, authentic cover letters grounded strictly in the candidate's real experience.
-
-CRITICAL RULES:
-- Use ONLY experiences and achievements present in the provided CV.
-- Do NOT fabricate results, metrics, or accomplishments not in the CV.
-- Mirror the company's tone where evident from culture notes.
-- Structure: opening hook → relevant experience → company-specific motivation → call to action.
-- Target length: 250-350 words."""
-
-
-def build_initial_prompt(job: dict, company: dict, cv: dict) -> str:
-    return f"""
-<job_context>
-{json.dumps(job.get('summary', {}), indent=2)}
-</job_context>
-
-<company_context>
-culture_notes: {json.dumps(company.get('culture_notes', []))}
-recent_news: {company.get('recent_news', 'N/A')}
-</company_context>
-
-<candidate_cv>
-{json.dumps(cv, indent=2)}
-</candidate_cv>
-
-Write a cover letter for this role.
-"""
-
 
 def _build_autonomous_user_prompt(job: dict, company: dict, cv: dict) -> str:
     today = datetime.now(timezone.utc).strftime("%-d %B %Y")
@@ -74,6 +46,32 @@ def _build_autonomous_user_prompt(job: dict, company: dict, cv: dict) -> str:
         f"</company_context>\n"
         f"{pref_block}"
         f"<candidate_cv>\n{json.dumps(cv, indent=2)}\n</candidate_cv>"
+    )
+
+
+def _build_revision_user_prompt(job: dict, company: dict, cv: dict,
+                                 existing_letter: dict, feedback: str) -> str:
+    today = datetime.now(timezone.utc).strftime("%-d %B %Y")
+
+    preferences = cv.get("preferences", {})
+    pref_block = ""
+    if preferences:
+        pref_block = f"\n<candidate_preferences>\n{json.dumps(preferences, indent=2)}\n</candidate_preferences>\n"
+
+    return (
+        f"<today>{today}</today>\n\n"
+        f"<job_summary>\n{json.dumps(job.get('summary', {}), indent=2)}\n</job_summary>\n\n"
+        f"<company_context>\n"
+        f"company_name: {job.get('company', '')}\n"
+        f"culture_notes: {json.dumps(company.get('culture_notes', []))}\n"
+        f"recent_news: {company.get('recent_news', 'N/A')}\n"
+        f"candidate_fit_reasoning: {company.get('candidate_fit_reasoning', 'N/A')}\n"
+        f"</company_context>\n"
+        f"{pref_block}"
+        f"<candidate_cv>\n{json.dumps(cv, indent=2)}\n</candidate_cv>\n\n"
+        f"<existing_cover_letter>\n{json.dumps(existing_letter, indent=2)}\n</existing_cover_letter>\n\n"
+        f"<user_feedback>\n{feedback}\n</user_feedback>\n\n"
+        f"{REVISION_INSTRUCTION}"
     )
 
 
@@ -173,133 +171,123 @@ def render_markdown(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _finalise_cover_letter(job_id: str, raw_response: str, job: dict,
+                            company_name: str, label: str) -> dict:
+    """Common finalisation: parse, validate, render, upload, persist, return."""
+    cover_letter_data = _parse_json(raw_response, label)
+    _validate_cover_letter(cover_letter_data)
+    logger.info("Cover letter JSON parsed and validated (%s)", label)
+
+    pdf_bytes = render_cover_letter_pdf(cover_letter_data)
+
+    role = job.get("positionName", "")
+    filename = build_filename(company_name, role)
+    s3_key = _upload_to_s3(job_id, pdf_bytes, filename)
+    pdf_url = _generate_presigned_url(s3_key)
+    logger.info("PDF uploaded to S3: %s", s3_key)
+
+    markdown = render_markdown(cover_letter_data)
+
+    jobs_table.update_item(
+        Key={'id': job_id},
+        UpdateExpression=(
+            "SET cover_letter_data = :data, cover_letter = :cl, "
+            "cover_letter_pdf_key = :key, cover_letter_status = :s"
+        ),
+        ExpressionAttributeValues={
+            ':data': cover_letter_data,
+            ':cl': markdown,
+            ':key': s3_key,
+            ':s': 'done',
+        }
+    )
+
+    return {
+        "job_id": job_id,
+        "cover_letter": markdown,
+        "cover_letter_pdf_url": pdf_url,
+    }
+
+
 def lambda_handler(event, context):
     job_id = event['job_id']
-    mode = event.get('mode', 'autonomous')
+    mode = event.get('mode', 'generate')
     feedback = event.get('feedback')
-    conversation_history = event.get('conversation_history', [])
 
-    logger.info(f"Generating cover letter for job_id: {job_id}, mode: {mode}")
+    logger.info("Cover letter request: job_id=%s, mode=%s", job_id, mode)
 
-    if mode == 'guided':
-        job = jobs_table.get_item(Key={'id': job_id}).get('Item', {})
+    if mode not in ('generate', 'revise'):
+        raise ValueError(
+            f"Invalid mode '{mode}'. Expected 'generate' or 'revise'. "
+            "The 'autonomous' and 'guided' modes have been removed."
+        )
+
+    if mode == 'revise' and not feedback:
+        raise ValueError("Mode 'revise' requires non-empty 'feedback' field")
+
+    jobs_table.update_item(
+        Key={'id': job_id},
+        UpdateExpression="SET cover_letter_status = :s, cover_letter_started_at = :t REMOVE cover_letter_error",
+        ExpressionAttributeValues={
+            ':s': 'generating',
+            ':t': datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    try:
+        job = jobs_table.get_item(Key={'id': job_id}).get('Item')
         if not job:
             raise ValueError(f"Job {job_id} not found")
 
         company_name = job.get('company', '')
-        company = companies_table.get_item(Key={'company_name': company_name}).get('Item', {})
-        cv = profiles_table.get_item(Key={'profile_id': 'primary'}).get('Item', {})
+        company = companies_table.get_item(
+            Key={'company_name': company_name}
+        ).get('Item', {})
+        cv = profiles_table.get_item(
+            Key={'profile_id': 'primary'}
+        ).get('Item', {})
 
-        if not conversation_history:
-            messages = [{"role": "user", "content": build_initial_prompt(job, company, cv)}]
-        else:
-            messages = conversation_history + [
-                {"role": "user", "content": feedback or "Please revise the cover letter."}
-            ]
+        if mode == 'generate':
+            user_prompt = _build_autonomous_user_prompt(job, company, cv)
+            label = "cover letter generation"
+        else:  # mode == 'revise'
+            existing = job.get('cover_letter_data')
+            if not existing:
+                raise ValueError(
+                    f"No existing cover letter to revise for job {job_id}. "
+                    "Generate one first before requesting revision."
+                )
+            user_prompt = _build_revision_user_prompt(
+                job, company, cv, existing, feedback
+            )
+            label = "cover letter revision"
 
+        logger.info("Running LLM call for %s", label)
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=GUIDED_SYSTEM_PROMPT,
-            messages=messages
+            max_tokens=2048,
+            system=AUTONOMOUS_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
         )
-        draft = ""
+        raw = ""
         for block in response.content:
             if block.type == "text":
-                draft += block.text
+                raw = block.text
                 break
 
-        updated_history = messages + [{"role": "assistant", "content": draft}]
-        logger.info(f"Guided draft generated for job_id: {job_id}")
+        return _finalise_cover_letter(job_id, raw, job, company_name, label)
 
-        return {
-            "job_id": job_id,
-            "mode": "guided",
-            "draft": draft,
-            "conversation_history": updated_history,
-            "complete": False
-        }
-
-    else:  # autonomous
-        jobs_table.update_item(
-            Key={'id': job_id},
-            UpdateExpression="SET cover_letter_status = :s, cover_letter_started_at = :t REMOVE cover_letter_error",
-            ExpressionAttributeValues={
-                ':s': 'generating',
-                ':t': datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
+    except Exception as e:
+        logger.exception("cover-letter-generator failed for job_id %s", job_id)
         try:
-            job = jobs_table.get_item(Key={'id': job_id}).get('Item')
-            if not job:
-                raise ValueError(f"Job {job_id} not found")
-
-            company_name = job.get('company', '')
-            company = companies_table.get_item(Key={'company_name': company_name}).get('Item', {})
-            cv = profiles_table.get_item(Key={'profile_id': 'primary'}).get('Item', {})
-
-            user_prompt = _build_autonomous_user_prompt(job, company, cv)
-
-            logger.info("Running single-call CoT generation for job_id: %s", job_id)
-            response = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=2048,
-                system=AUTONOMOUS_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            raw = ""
-            for block in response.content:
-                if block.type == "text":
-                    raw = block.text
-                    break
-
-            cover_letter_data = _parse_json(raw, "cover letter generation")
-            _validate_cover_letter(cover_letter_data)
-            logger.info("Cover letter JSON parsed and validated")
-
-            pdf_bytes = render_cover_letter_pdf(cover_letter_data)
-
-            role = job.get("positionName", "")
-            filename = build_filename(company_name, role)
-            s3_key = _upload_to_s3(job_id, pdf_bytes, filename)
-            pdf_url = _generate_presigned_url(s3_key)
-            logger.info("PDF uploaded to S3: %s", s3_key)
-
-            markdown = render_markdown(cover_letter_data)
-
             jobs_table.update_item(
                 Key={'id': job_id},
-                UpdateExpression=(
-                    "SET cover_letter_data = :data, cover_letter = :cl, "
-                    "cover_letter_pdf_key = :key, cover_letter_status = :s"
-                ),
+                UpdateExpression="SET cover_letter_status = :s, cover_letter_error = :e",
                 ExpressionAttributeValues={
-                    ':data': cover_letter_data,
-                    ':cl': markdown,
-                    ':key': s3_key,
-                    ':s': 'done',
+                    ':s': 'failed',
+                    ':e': str(e)[:500],
                 }
             )
-
-            logger.info("Autonomous cover letter generated for job_id: %s", job_id)
-            return {
-                "job_id": job_id,
-                "cover_letter": markdown,
-                "cover_letter_pdf_url": pdf_url,
-            }
-
-        except Exception as e:
-            logger.exception("cover-letter-generator failed for job_id %s", job_id)
-            try:
-                jobs_table.update_item(
-                    Key={'id': job_id},
-                    UpdateExpression="SET cover_letter_status = :s, cover_letter_error = :e",
-                    ExpressionAttributeValues={
-                        ':s': 'failed',
-                        ':e': str(e)[:500],
-                    }
-                )
-            except Exception:
-                logger.exception("Failed to write failure status to DDB")
-            raise
+        except Exception:
+            logger.exception("Failed to write failure status to DDB")
+        raise

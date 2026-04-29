@@ -228,21 +228,23 @@ def generate_cover_letter(job_id, body):
     except json.JSONDecodeError:
         return response(400, {'error': 'Invalid JSON body'})
 
-    mode = data.get('mode', 'autonomous')
-    payload = {
-        'job_id': job_id,
-        'mode': mode,
-        'feedback': data.get('feedback'),
-        'conversation_history': data.get('conversation_history', [])
-    }
+    mode = data.get('mode', 'generate')
+    feedback = data.get('feedback')
 
-    if mode == 'guided':
-        result = invoke_lambda('cover-letter-generator', payload)
-        if 'errorMessage' in result:
-            return response(500, {'error': result['errorMessage']})
-        return response(200, result)
+    if mode not in ('generate', 'revise'):
+        return response(400, {
+            'error': f"Invalid mode '{mode}'. Expected 'generate' or 'revise'."
+        })
 
-    # autonomous — fire-and-forget
+    if mode == 'revise' and (not feedback or not feedback.strip()):
+        return response(400, {
+            'error': "Mode 'revise' requires non-empty 'feedback' field"
+        })
+
+    payload = {'job_id': job_id, 'mode': mode}
+    if feedback:
+        payload['feedback'] = feedback
+
     lambda_client.invoke(
         FunctionName='cover-letter-generator',
         InvocationType='Event',

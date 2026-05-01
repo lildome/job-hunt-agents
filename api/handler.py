@@ -151,7 +151,8 @@ def get_job(job_id, auth):
         return response(404, {'error': f'Job {job_id} not found'})
 
     company_name = job.get('company', '')
-    company = companies_table.get_item(Key={'company_name': company_name}).get('Item', {})
+    canonical_name = job.get('canonical_company_name', company_name)
+    company = companies_table.get_item(Key={'company_name': canonical_name}).get('Item', {})
 
     if auth == 'absent':
         for field in ('match_score', 'match_summary', 'tailored_resume', 'cover_letter'):

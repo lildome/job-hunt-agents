@@ -13,6 +13,9 @@ PIN = "Job Hunt PIN 159075"
 S3_BUCKET = "dprofico-job-hunt-artifacts"
 STALE_THRESHOLD = timedelta(minutes=5)
 
+LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
+LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
+
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 lambda_client = boto3.client('lambda', region_name='us-east-1')
 s3_client = boto3.client('s3', region_name='us-east-1')
@@ -211,7 +214,7 @@ def update_job_status(job_id, body):
     )
     return response(200, {'job_id': job_id, 'status': new_status})
 
-def start_scrape(body):
+def start_indeed_scrape(body):
     try:
         data = json.loads(body or '{}')
     except json.JSONDecodeError:
@@ -232,14 +235,58 @@ def start_scrape(body):
         except (ValueError, TypeError):
             return response(400, {'error': 'maxItemsPerSearch must be an integer'})
 
-    # Fire-and-forget — scraping takes minutes
     lambda_client.invoke(
         FunctionName='job-scraper',
         InvocationType='Event',
         Payload=json.dumps({'job_board': 'indeed', 'run_input': run_input}).encode()
     )
-    logger.info(f"Scrape triggered: {run_input}")
+    logger.info(f"Indeed scrape triggered: {run_input}")
     return response(202, {'message': 'Scrape started', 'run_input': run_input})
+
+def start_linkedin_scrape(body):
+    try:
+        data = json.loads(body or '{}')
+    except json.JSONDecodeError:
+        return response(400, {'error': 'Invalid JSON body'})
+
+    keywords = data.get('keywords', '').strip()
+    if not keywords:
+        return response(400, {'error': 'keywords is required'})
+
+    location = data.get('location', '').strip()
+    if not location:
+        return response(400, {'error': 'location is required'})
+
+    search_params = {'keywords': keywords, 'location': location}
+
+    if 'remote' in data:
+        if data['remote'] not in LINKEDIN_REMOTE_VALUES:
+            return response(400, {'error': f"Invalid 'remote' value. Allowed: {sorted(LINKEDIN_REMOTE_VALUES)}"})
+        search_params['remote'] = data['remote']
+
+    if 'posted_within' in data:
+        if data['posted_within'] not in LINKEDIN_POSTED_WITHIN_VALUES:
+            return response(400, {'error': f"Invalid 'posted_within' value. Allowed: {sorted(LINKEDIN_POSTED_WITHIN_VALUES)}"})
+        search_params['posted_within'] = data['posted_within']
+
+    count = 50
+    if 'count' in data:
+        try:
+            count = int(data['count'])
+        except (ValueError, TypeError):
+            return response(400, {'error': 'count must be an integer'})
+
+    lambda_client.invoke(
+        FunctionName='job-scraper',
+        InvocationType='Event',
+        Payload=json.dumps({
+            'job_board': 'linkedin',
+            'search_params': search_params,
+            'count': count,
+        }).encode()
+    )
+    logger.info(f"LinkedIn scrape triggered: {search_params} count={count}")
+    return response(202, {'message': 'Scrape started', 'search_params': search_params, 'count': count})
 
 def tailor_resume(job_id):
     lambda_client.invoke(
@@ -408,9 +455,13 @@ def lambda_handler(event, context):
     if m and method == 'POST':
         return generate_cover_letter(m.group(1), body)
 
-    # POST /scrape
-    if method == 'POST' and path == '/scrape':
-        return start_scrape(body)
+    # POST /scrape/indeed
+    if method == 'POST' and path == '/scrape/indeed':
+        return start_indeed_scrape(body)
+
+    # POST /scrape/linkedin
+    if method == 'POST' and path == '/scrape/linkedin':
+        return start_linkedin_scrape(body)
 
     # GET /jobs/{id}/resume/download
     m = re.match(r'^/jobs/([^/]+)/resume/download$', path)

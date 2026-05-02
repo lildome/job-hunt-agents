@@ -303,6 +303,12 @@ def get_generation_status(job_id):
     })
 
 
+def _filename_from_key(key: str) -> str:
+    # Keys are {prefix}/{job_id}/{timestamp}-{filename}; strip the timestamp prefix
+    basename = key.split('/')[-1]
+    return basename.split('-', 1)[-1]
+
+
 def get_resume_download(job_id):
     job = jobs_table.get_item(Key={'id': job_id}).get('Item')
     if not job:
@@ -312,12 +318,13 @@ def get_resume_download(job_id):
     if not pdf_key:
         return response(404, {'error': 'Resume PDF not yet generated'})
 
+    filename = _filename_from_key(pdf_key)
     url = s3_client.generate_presigned_url(
         'get_object',
         Params={
             'Bucket': S3_BUCKET,
             'Key': pdf_key,
-            'ResponseContentDisposition': 'attachment; filename="resume.pdf"',
+            'ResponseContentDisposition': f'attachment; filename="{filename}"',
         },
         ExpiresIn=300,
     )
@@ -333,12 +340,13 @@ def get_cover_letter_download(job_id):
     if not pdf_key:
         return response(404, {'error': 'Cover letter PDF not yet generated'})
 
+    filename = _filename_from_key(pdf_key)
     url = s3_client.generate_presigned_url(
         'get_object',
         Params={
             'Bucket': S3_BUCKET,
             'Key': pdf_key,
-            'ResponseContentDisposition': 'attachment; filename="cover-letter.pdf"',
+            'ResponseContentDisposition': f'attachment; filename="{filename}"',
         },
         ExpiresIn=300,
     )

@@ -32,9 +32,9 @@ STRUCTURE PRINCIPLES:
 The cover letter is a short argument for why the candidate fits this specific role at this specific company. It is not a list of qualifications and not a narrative autobiography. The structure follows from the argument, not from a template.
 
 - Every paragraph should do one specific thing. If a paragraph could be deleted without weakening the case, it should be. If two paragraphs are doing the same thing, they should be one paragraph.
-- Lead with substance. The opening should establish the connection between the candidate and the role; it should not announce the existence of the cover letter or restate that the candidate is applying.
+- Lead with substance, but frame before diving in. The opening sentence (or first two, if they are short) should give the reader a positioning claim about the candidate before the substantive case begins. The framing prepares the reader for the argument that follows; the body develops it with specifics. This framing is not the same as announcing the existence of the cover letter or restating that the candidate is applying.
 - Earn the company-specific content. References to company context (culture, recent news, mission) are valuable when they connect to something specific in the candidate's experience or motivation. Generic flattery of the company is not.
-- Close with something forward-looking and concrete. The candidate's interest in the role and what would happen next, framed in a way that is specific to this application, not boilerplate.
+- Close with something forward-looking and concrete. State the candidate's interest in the role and what would happen next, framed in a way that is specific to this application. If the company or role context does not support a specific, substantive closing, write a brief closing rather than padding with generic language. A short closing is preferable to a long closing built on filler.
 - Weight emphasis on the job's requirements according to the priority signals in the job summary (high before mid before low).
 
 LENGTH:

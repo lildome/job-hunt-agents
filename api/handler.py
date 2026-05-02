@@ -77,11 +77,37 @@ def _build_generation_status(job: dict, prefix: str) -> dict:
 
     pdf_url = None
     if status == 'done' and pdf_key:
-        pdf_url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': S3_BUCKET, 'Key': pdf_key},
-            ExpiresIn=86400,
-        )
+        cached_url = job.get(f'{prefix}_pdf_url_cached')
+        cached_at_str = job.get(f'{prefix}_pdf_url_generated_at')
+        use_cache = False
+        if cached_url and cached_at_str:
+            try:
+                cached_at = datetime.fromisoformat(cached_at_str)
+                if datetime.now(timezone.utc) - cached_at < timedelta(hours=12):
+                    use_cache = True
+            except (ValueError, TypeError):
+                pass
+
+        if use_cache:
+            pdf_url = cached_url
+        else:
+            pdf_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': S3_BUCKET, 'Key': pdf_key},
+                ExpiresIn=86400,
+            )
+            jobs_table.update_item(
+                Key={'id': job['id']},
+                UpdateExpression='SET #u = :u, #g = :g',
+                ExpressionAttributeNames={
+                    '#u': f'{prefix}_pdf_url_cached',
+                    '#g': f'{prefix}_pdf_url_generated_at',
+                },
+                ExpressionAttributeValues={
+                    ':u': pdf_url,
+                    ':g': datetime.now(timezone.utc).isoformat(),
+                },
+            )
 
     return {
         'status': status,

@@ -358,7 +358,7 @@ def lambda_handler(event, context):
 
     jobs_table.update_item(
         Key={'id': job_id},
-        UpdateExpression="SET tailored_resume_status = :s, tailored_resume_started_at = :t REMOVE tailored_resume_error",
+        UpdateExpression="SET tailored_resume_status = :s, tailored_resume_started_at = :t REMOVE tailored_resume_error, tailored_resume_pdf_url_cached, tailored_resume_pdf_url_generated_at",
         ExpressionAttributeValues={
             ':s': 'generating',
             ':t': datetime.now(timezone.utc).isoformat(),

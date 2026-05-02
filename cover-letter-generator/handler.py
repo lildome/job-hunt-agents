@@ -227,7 +227,7 @@ def lambda_handler(event, context):
 
     jobs_table.update_item(
         Key={'id': job_id},
-        UpdateExpression="SET cover_letter_status = :s, cover_letter_started_at = :t REMOVE cover_letter_error",
+        UpdateExpression="SET cover_letter_status = :s, cover_letter_started_at = :t REMOVE cover_letter_error, cover_letter_pdf_url_cached, cover_letter_pdf_url_generated_at",
         ExpressionAttributeValues={
             ':s': 'generating',
             ':t': datetime.now(timezone.utc).isoformat(),

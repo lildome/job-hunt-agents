@@ -1,43 +1,48 @@
 import json
+import logging
 import boto3
 from apify_client import ApifyClient
 from scrapers.indeed_scraper import scrape_indeed
 from scrapers.linkedin_scraper import scrape_linkedin
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('jobs')
 
 ssm_client = boto3.client('ssm', region_name='us-east-1')
 
-apify_token = None
+_apify_client = None
 
-try:
-    apify_token = ssm_client.get_parameter(Name='apify-api-key')['Parameter']['Value']
-except Exception as e:
-    print(f"Error retrieving Apify API key from SSM: {e}")
-    apify_token = None
-    exit(1)
-
-client = ApifyClient(apify_token)
+def get_apify_client():
+    global _apify_client
+    if _apify_client is None:
+        token = ssm_client.get_parameter(Name='apify-api-key')['Parameter']['Value']
+        _apify_client = ApifyClient(token)
+    return _apify_client
 
 def lambda_handler(event, context):
+    client = get_apify_client()
 
-    result = {}
+    job_board = event.get('job_board')
 
-    if event['job_board'] == 'indeed':
-        run_input = event['run_input']
-        result = scrape_indeed(client, run_input)
-    elif event['job_board'] == 'linkedin':
-        search_params = event['search_params']
-        count = event.get('count', 50)
-        result = scrape_linkedin(client, search_params, count)
+    if job_board == 'indeed':
+        result = scrape_indeed(client, event['run_input'])
+    elif job_board == 'linkedin':
+        result = scrape_linkedin(client, event['search_params'], event.get('count', 50))
+    else:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': f'Unknown or missing job_board: {job_board}'})
+        }
 
     for item in result:
         try:
             table.put_item(Item=item)
             item['dbInsertSuccess'] = True
         except Exception as e:
-            print(f"Error inserting item into DynamoDB: {e}")
+            logger.error(f"Error inserting item into DynamoDB: {e}")
             item['dbInsertSuccess'] = False
             continue
 

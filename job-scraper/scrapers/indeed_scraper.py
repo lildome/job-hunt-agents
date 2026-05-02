@@ -1,14 +1,16 @@
-from apify_client import ApifyClient
+import logging
 import uuid
-from datetime import datetime
+from apify_client import ApifyClient
 
-def scrape_indeed (apify_client : ApifyClient, run_input : dict) -> dict:
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+def scrape_indeed(apify_client: ApifyClient, run_input: dict) -> list:
     try:
         run = apify_client.actor("hMvNSpz3JnHgl5jkh").call(run_input=run_input)
     except Exception as e:
-        print(f"Error occurred while scraping Indeed: {e}")
-        return {"error": str(e)}
-    
+        logger.error(f"Error scraping Indeed: {e}")
+        return []
 
     keys_to_extract = ['salary', 'positionName', 'company', 'location', 'url', 'scrapedAt', 'postingDateParsed', 'description']
     extracted_listings = []
@@ -20,5 +22,5 @@ def scrape_indeed (apify_client : ApifyClient, run_input : dict) -> dict:
         extracted_run['status'] = 'new'
         extracted_run['source'] = 'indeed'
         extracted_listings.append(extracted_run)
-        print(listing.keys())
+        logger.info(listing.keys())
     return extracted_listings

@@ -303,6 +303,48 @@ def get_generation_status(job_id):
     })
 
 
+def get_resume_download(job_id):
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    pdf_key = job.get('tailored_resume_pdf_key')
+    if not pdf_key:
+        return response(404, {'error': 'Resume PDF not yet generated'})
+
+    url = s3_client.generate_presigned_url(
+        'get_object',
+        Params={
+            'Bucket': S3_BUCKET,
+            'Key': pdf_key,
+            'ResponseContentDisposition': 'attachment; filename="resume.pdf"',
+        },
+        ExpiresIn=300,
+    )
+    return response(200, {'url': url})
+
+
+def get_cover_letter_download(job_id):
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    pdf_key = job.get('cover_letter_pdf_key')
+    if not pdf_key:
+        return response(404, {'error': 'Cover letter PDF not yet generated'})
+
+    url = s3_client.generate_presigned_url(
+        'get_object',
+        Params={
+            'Bucket': S3_BUCKET,
+            'Key': pdf_key,
+            'ResponseContentDisposition': 'attachment; filename="cover-letter.pdf"',
+        },
+        ExpiresIn=300,
+    )
+    return response(200, {'url': url})
+
+
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
     path = event.get('path', '')
@@ -361,5 +403,15 @@ def lambda_handler(event, context):
     # POST /scrape
     if method == 'POST' and path == '/scrape':
         return start_scrape(body)
+
+    # GET /jobs/{id}/resume/download
+    m = re.match(r'^/jobs/([^/]+)/resume/download$', path)
+    if m and method == 'GET':
+        return get_resume_download(m.group(1))
+
+    # GET /jobs/{id}/cover-letter/download
+    m = re.match(r'^/jobs/([^/]+)/cover-letter/download$', path)
+    if m and method == 'GET':
+        return get_cover_letter_download(m.group(1))
 
     return response(404, {'error': f'Route not found: {method} {path}'})

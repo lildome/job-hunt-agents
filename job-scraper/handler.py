@@ -2,6 +2,7 @@ import json
 import boto3
 from apify_client import ApifyClient
 from scrapers.indeed_scraper import scrape_indeed
+from scrapers.linkedin_scraper import scrape_linkedin
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('jobs')
@@ -26,6 +27,10 @@ def lambda_handler(event, context):
     if event['job_board'] == 'indeed':
         run_input = event['run_input']
         result = scrape_indeed(client, run_input)
+    elif event['job_board'] == 'linkedin':
+        search_params = event['search_params']
+        count = event.get('count', 50)
+        result = scrape_linkedin(client, search_params, count)
 
     for item in result:
         try:

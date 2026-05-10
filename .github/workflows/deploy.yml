@@ -12,6 +12,7 @@ on:
       - 'cv-matcher/**'
       - 'resume-tailor/**'
       - 'cover-letter-generator/**'
+      - 'job-screener/**'
 
 env:
   AWS_REGION: us-east-1

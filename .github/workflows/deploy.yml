@@ -50,6 +50,8 @@ jobs:
               - 'resume-tailor/**'
             cover-letter-generator:
               - 'cover-letter-generator/**'
+            job-screener:
+              - 'job-screener/**'
 
   deploy:
     name: Build & deploy ${{ matrix.function }}

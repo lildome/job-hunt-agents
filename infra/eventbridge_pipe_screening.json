@@ -1,0 +1,15 @@
+{
+  "_comment_purpose": "Staged target configuration for the existing DDB stream EventBridge Pipe. This will be applied during phase 2 of the architecture migration. It changes the pipe's target from job-processing-queue to job-screening-queue. Apply manually via 'aws pipes update-pipe' once the job-screener Lambda is deployed and the screening queue exists.",
+  "_comment_apply_command": "aws pipes update-pipe --name <existing-pipe-name> --target arn:aws:sqs:us-east-1:052732928292:job-screening-queue --region us-east-1",
+  "_comment_existing_pipe_lookup": "Find the existing pipe name with: aws pipes list-pipes --region us-east-1 --query 'Pipes[?contains(Source, `jobs`)]'",
+  "TargetParameters": {
+    "InputTemplate": "<$.dynamodb>"
+  },
+  "FilterCriteria": {
+    "Filters": [
+      {
+        "Pattern": "{\"eventName\": [\"INSERT\"]}"
+      }
+    ]
+  }
+}

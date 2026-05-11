@@ -34,7 +34,7 @@ Weighting rules:
 Return your findings in exactly this format. No text outside these fields.
 
 match_score: {integer 1-10}
-match_summary: {4-6 sentences explaining the score, citing specific CV evidence for or against key requirements, weighted by emphasis score}"""
+match_reasoning: {4-6 sentences explaining the score, citing specific CV evidence for or against key requirements, weighted by emphasis score}"""
 
 def build_prompt(job_summary: dict, cv: dict) -> str:
     return f"""
@@ -86,22 +86,22 @@ def lambda_handler(event, context):
             break
 
     match_score = None
-    match_summary = None
+    match_reasoning = None
     for line in response_text.splitlines():
         if line.startswith("match_score:"):
             try:
                 match_score = int(line.split(":", 1)[1].strip())
             except ValueError:
                 logger.error(f"Could not parse match_score from: {line}")
-        elif line.startswith("match_summary:"):
-            match_summary = line.split(":", 1)[1].strip()
+        elif line.startswith("match_reasoning:"):
+            match_reasoning = line.split(":", 1)[1].strip()
 
     jobs_table.update_item(
         Key={'id': job_id},
-        UpdateExpression="SET match_score = :score, match_summary = :summary",
+        UpdateExpression="SET analysis.match_score = :score, analysis.match_reasoning = :reasoning",
         ExpressionAttributeValues={
             ':score': match_score,
-            ':summary': match_summary
+            ':reasoning': match_reasoning
         }
     )
 

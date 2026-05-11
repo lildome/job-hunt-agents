@@ -120,7 +120,7 @@ def lambda_handler(event, context):
         try:
             table.update_item(
                 Key={'id': job['id']},
-                UpdateExpression="SET #summary = :summary",
+                UpdateExpression="SET analysis.#summary = :summary",
                 ExpressionAttributeNames={
                     "#summary": "summary"
                 },

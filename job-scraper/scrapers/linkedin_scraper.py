@@ -70,7 +70,7 @@ def scrape_linkedin(apify_client: ApifyClient, search_params: dict, count: int) 
             "description":  item.get("descriptionText", ""),
             "postingDate":  item.get("postedAt", ""),
             "scrapedAt":    datetime.now(timezone.utc).isoformat(),
-            "id":           str(uuid.uuid4()),
+            "id":           f"job_{uuid.uuid4()}",
             "status":       "new",
             "source":       "linkedin",
         })

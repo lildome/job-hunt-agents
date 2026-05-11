@@ -1,8 +1,10 @@
 import json
 import logging
 import time
+import uuid
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
 from google import genai
 from google.genai import types
@@ -142,12 +144,12 @@ def lambda_handler(event, context):
                 logger.info(f"Skipping {job_id} — screening already complete")
                 continue
 
-            company = job.get('company', '')
+            raw_company_name = job.get('company', '')
             position_name = job.get('positionName', '')
             location = job.get('location', '')
             description = job.get('description', '')
 
-            logger.info(f"Screening job {job_id}: {position_name} at {company}")
+            logger.info(f"Screening job {job_id}: {position_name} at {raw_company_name}")
 
             jobs_table.update_item(
                 Key={'id': job_id},
@@ -156,17 +158,6 @@ def lambda_handler(event, context):
             )
 
             try:
-                mapping_already_existed = False
-                canonical_company_name = None
-                canonical_name_confidence = None
-
-                mapping = mappings_table.get_item(Key={'raw_name': company}).get('Item')
-                if mapping:
-                    canonical_company_name = mapping['canonical_company_name']
-                    canonical_name_confidence = 'high'
-                    mapping_already_existed = True
-                    logger.info(f"Mapping found for {company} → {canonical_company_name}")
-
                 cv_summary_text = get_cv_summary_text()
 
                 user_message = f"""<candidate_summary>
@@ -175,7 +166,7 @@ def lambda_handler(event, context):
 
 <job>
 positionName: {position_name}
-company: {company}
+company: {raw_company_name}
 location: {location}
 description: {description}
 </job>
@@ -194,7 +185,7 @@ description: {description}
                         config=config,
                     )
                 except ResourceExhausted:
-                    logger.warning(f"Rate limited screening {position_name} at {company} — waiting 65s before retry")
+                    logger.warning(f"Rate limited screening {position_name} at {raw_company_name} — waiting 65s before retry")
                     time.sleep(65)
                     response = gemini_client.models.generate_content(
                         model="gemini-2.5-flash",
@@ -203,44 +194,86 @@ description: {description}
                     )
 
                 result = json.loads(response.text)
+                model_canonical = result['canonical_company_name']
 
-                if mapping_already_existed:
-                    pass
+                # Step 4a: raw name in mappings table
+                raw_was_mapped = False
+                company_id = None
+
+                mapping = mappings_table.get_item(Key={'raw_name': raw_company_name}).get('Item')
+                if mapping:
+                    company_id = mapping['company_id']
+                    raw_was_mapped = True
+                    logger.info(f"Mapping found for raw name {raw_company_name!r} → {company_id}")
+
+                # Step 4b: model's canonical name in companies GSI
+                if company_id is None:
+                    gsi_result = companies_table.query(
+                        IndexName='canonical-name-index',
+                        KeyConditionExpression=Key('canonical_name').eq(model_canonical),
+                    )
+                    items = gsi_result.get('Items', [])
+                    if items:
+                        company_id = items[0]['id']
+                        logger.info(f"GSI found company for {model_canonical!r} → {company_id}")
+
+                # Step 4c: model's canonical name in mappings table
+                if company_id is None:
+                    mapping = mappings_table.get_item(Key={'raw_name': model_canonical}).get('Item')
+                    if mapping:
+                        company_id = mapping['company_id']
+                        logger.info(f"Mapping found for canonical name {model_canonical!r} → {company_id}")
+
+                if company_id is None:
+                    # Step 4d-create: no existing company found
+                    company_id = f"comp_{uuid.uuid4()}"
+                    companies_table.put_item(Item={
+                        'id': company_id,
+                        'canonical_name': model_canonical,
+                        'aliases': [raw_company_name],
+                        'job_count': 1,
+                    })
+                    mappings_table.put_item(Item={
+                        'raw_name': raw_company_name,
+                        'company_id': company_id,
+                    })
+                    logger.info(f"Created new company {company_id} for {model_canonical!r}")
                 else:
-                    model_confidence = result['canonical_name_confidence']
-                    model_canonical = result['canonical_company_name']
-                    canonical_name_confidence = model_confidence
+                    # Step 4d-existing: update existing company record
+                    existing = companies_table.get_item(Key={'id': company_id}).get('Item', {})
+                    aliases = existing.get('aliases', [])
 
-                    if model_confidence in ('high', 'mid'):
-                        canonical_company_name = model_canonical
-                        mappings_table.put_item(Item={
-                            'raw_name': company,
-                            'canonical_company_name': canonical_company_name,
-                        })
+                    if raw_company_name not in aliases:
                         companies_table.update_item(
-                            Key={'company_name': canonical_company_name},
+                            Key={'id': company_id},
                             UpdateExpression=(
                                 'ADD job_count :inc '
                                 'SET aliases = list_append(if_not_exists(aliases, :empty), :new)'
                             ),
                             ExpressionAttributeValues={
                                 ':inc': 1,
-                                ':new': [company],
+                                ':new': [raw_company_name],
                                 ':empty': [],
                             },
                         )
                     else:
-                        # confidence is 'low' — use raw scraped name per prompt's fallback rule
-                        if model_canonical != company:
-                            logger.warning(
-                                f"Model returned low-confidence name {model_canonical!r} for {company!r}, using raw name"
-                            )
-                        canonical_company_name = company
+                        companies_table.update_item(
+                            Key={'id': company_id},
+                            UpdateExpression='ADD job_count :inc',
+                            ExpressionAttributeValues={':inc': 1},
+                        )
+
+                    if not raw_was_mapped:
+                        mappings_table.put_item(Item={
+                            'raw_name': raw_company_name,
+                            'company_id': company_id,
+                        })
+
+                    logger.info(f"Updated company {company_id} for {raw_company_name!r}")
 
                 screening = {
                     'status': 'complete',
-                    'canonical_company_name': canonical_company_name,
-                    'canonical_name_confidence': canonical_name_confidence,
+                    'canonical_name_confidence': result['canonical_name_confidence'],
                     'match_score': result['match_score'],
                     'match_reasoning': result['match_reasoning'],
                     'recommendation_score': result['recommendation_score'],
@@ -250,8 +283,8 @@ description: {description}
 
                 jobs_table.update_item(
                     Key={'id': job_id},
-                    UpdateExpression='SET screening = :s',
-                    ExpressionAttributeValues={':s': screening}
+                    UpdateExpression='SET screening = :s, company_id = :c',
+                    ExpressionAttributeValues={':s': screening, ':c': company_id}
                 )
                 logger.info(
                     f"Screening complete for {job_id}: "

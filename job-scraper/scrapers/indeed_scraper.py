@@ -18,7 +18,7 @@ def scrape_indeed(apify_client: ApifyClient, run_input: dict) -> list:
         extracted_run = {key: listing[key] for key in keys_to_extract if key in listing.keys()}
         extracted_run['postingDate'] = extracted_run['postingDateParsed']
         del extracted_run['postingDateParsed']
-        extracted_run['id'] = str(uuid.uuid4())
+        extracted_run['id'] = f"job_{uuid.uuid4()}"
         extracted_run['status'] = 'new'
         extracted_run['source'] = 'indeed'
         extracted_listings.append(extracted_run)

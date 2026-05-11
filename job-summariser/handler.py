@@ -13,7 +13,7 @@ deserializer = TypeDeserializer()
 ssm = boto3.client('ssm', region_name='us-east-1')
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-table = dynamodb.Table('jobs')
+jobs_table = dynamodb.Table('jobs')
 
 def get_parameter(name):
     response = ssm.get_parameter(Name=name, WithDecryption=True)
@@ -57,79 +57,77 @@ salary: {salary in whatever format the description provided it in or “not spec
 red_flags: {note anything that might be viewed negatively by a prospective employee or “none identified” if nothing stands out}"""
 
 def lambda_handler(event, context):
-    logger.info(f"Event received: {json.dumps(event)}")
+    logger.info(f"Job received: {event['job_id']}")
 
-    records = event if isinstance(event, list) else event.get("Records", [])
-    for record in records:
-        if record["eventName"] != "INSERT":
+    job_id = event['job_id']
+    job_response = jobs_table.get_item(Key={'id': job_id})
+    if 'Item' not in job_response:
+        raise ValueError(f"Job {job_id} not found in jobs table")
+    job = job_response['Item']
+
+    job_description = job.get("description")
+
+    logger.info(f"Summarising job description for: {job.get('positionName')} at {job.get('company')}")
+
+    user_prompt = build_prompt(job_description)
+
+    api_kwargs = dict(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}]
+    )
+    try:
+        response = anthropic_client.messages.create(**api_kwargs)
+    except RateLimitError:
+        logger.warning("Rate limited — waiting 65s before retry")
+        time.sleep(65)
+        response = anthropic_client.messages.create(**api_kwargs)
+    
+    logger.info(f"Summarisation complete for: {job.get('positionName')} at {job.get('company')}")
+    
+    response_text = ""
+    for block in response.content:
+        if block.type == "text":
+            response_text += block.text
+            break
+
+    summary = {}
+    list_section = ""
+    for line in response_text.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("- ") and list_section:
+            requirement, confidence = stripped[2:].rsplit("|", 1)
+            summary[list_section].append({
+                "requirement": requirement.strip(),
+                "confidence": confidence.strip()
+            })
             continue
+        parts = line.split(":", 1)
+        if len(parts) == 2:
+            key = parts[0].strip()
+            value = parts[1].strip()
+            if key == 'education_requirements' or key == 'experience_requirements' or key == 'skill_requirements':
+                summary[key] = []
+                list_section = key
+            else:
+                list_section = ""
+                summary[key] = value
 
-        raw_item = record["dynamodb"]["NewImage"]
-        job = deserialize_item(raw_item)
-
-        job_description = job.get("description")
-
-        logger.info(f"Summarising job description for: {job.get('positionName')} at {job.get('company')}")
-
-        user_prompt = build_prompt(job_description)
-
-        api_kwargs = dict(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}]
+    try:
+        jobs_table.update_item(
+            Key={'id': job['id']},
+            UpdateExpression="SET analysis.#summary = :summary",
+            ExpressionAttributeNames={
+                "#summary": "summary"
+            },
+            ExpressionAttributeValues={
+                ":summary": summary
+            }
         )
-        try:
-            response = anthropic_client.messages.create(**api_kwargs)
-        except RateLimitError:
-            logger.warning("Rate limited — waiting 65s before retry")
-            time.sleep(65)
-            response = anthropic_client.messages.create(**api_kwargs)
-        
-        logger.info(f"Summarisation complete for: {job.get('positionName')} at {job.get('company')}")
-        
-        response_text = ""
-        for block in response.content:
-            if block.type == "text":
-                response_text += block.text
-                break
-
-        summary = {}
-        list_section = ""
-        for line in response_text.splitlines():
-            stripped = line.strip()
-
-            if stripped.startswith("- ") and list_section:
-                requirement, confidence = stripped[2:].rsplit("|", 1)
-                summary[list_section].append({
-                    "requirement": requirement.strip(),
-                    "confidence": confidence.strip()
-                })
-                continue
-            parts = line.split(":", 1)
-            if len(parts) == 2:
-                key = parts[0].strip()
-                value = parts[1].strip()
-                if key == 'education_requirements' or key == 'experience_requirements' or key == 'skill_requirements':
-                    summary[key] = []
-                    list_section = key
-                else:
-                    list_section = ""
-                    summary[key] = value
-
-        try:
-            table.update_item(
-                Key={'id': job['id']},
-                UpdateExpression="SET analysis.#summary = :summary",
-                ExpressionAttributeNames={
-                    "#summary": "summary"
-                },
-                ExpressionAttributeValues={
-                    ":summary": summary
-                }
-            )
-            logger.info(f"Job summary stored for: {job.get('positionName')} at {job.get('company')}")
-        except Exception as e:
-            logger.error(f"Error storing job summary for {job.get('positionName')} at {job.get('company')}: {e}")
+        logger.info(f"Job summary stored for: {job.get('positionName')} at {job.get('company')}")
+    except Exception as e:
+        logger.error(f"Error storing job summary for {job.get('positionName')} at {job.get('company')}: {e}")
 
     return {"job_id": job["id"]}

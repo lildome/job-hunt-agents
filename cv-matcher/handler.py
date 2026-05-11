@@ -56,7 +56,7 @@ def lambda_handler(event, context):
         raise ValueError(f"Job {job_id} not found in jobs table")
     job = job_response['Item']
 
-    if 'summary' not in job:
+    if 'summary' not in job['analysis']:
         raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
 
     cv_response = profiles_table.get_item(Key={'profile_id': 'primary'})
@@ -64,7 +64,7 @@ def lambda_handler(event, context):
         raise ValueError("Candidate profile not found — insert 'primary' record into candidate_profiles")
     cv = cv_response['Item']
 
-    user_prompt = build_prompt(job['summary'], cv)
+    user_prompt = build_prompt(job['analysis']['summary'], cv)
 
     api_kwargs = dict(
         model="claude-sonnet-4-6",

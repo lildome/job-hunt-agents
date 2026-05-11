@@ -77,17 +77,42 @@ def lambda_handler(event, context):
 
             logger.info(f"Processing job_id: {job_id} ({job.get('company')} — {job.get('positionName')})")
 
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression='SET analysis = :a',
+                ExpressionAttributeValues={':a': {"status" : "summarising"}}
+            )
+
             # Step 1: Summarise
             logger.info(f"Step 1/3: Summarising job {job_id}")
-            invoke('job-summariser', records)
+            invoke('job-summariser', {'job_id': job_id})
+
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression='SET analysis.status = :update',
+                ExpressionAttributeValues={':update': "researching"}
+            )
 
             # Step 2: Company research
             logger.info(f"Step 2/3: Researching company for job {job_id}")
-            invoke('company-researcher', records)
+            invoke('company-researcher', {'job_id': job_id})
+
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression='SET analysis.status = :update',
+                ExpressionAttributeValues={':update': "matching"}
+            )
 
             # Step 3: CV match
             logger.info(f"Step 3/3: Matching CV for job {job_id}")
             invoke('cv-matcher', {'job_id': job_id})
 
             complete_job(job_id)
+
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression='SET analysis.status = :update',
+                ExpressionAttributeValues={':update': "complete"}
+            )
+
             logger.info(f"Processing complete for job_id: {job_id}")

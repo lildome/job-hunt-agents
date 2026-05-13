@@ -41,16 +41,6 @@ def claim_job(job_id):
             return False
         raise
 
-
-def complete_job(job_id):
-    jobs_table.update_item(
-        Key={'id': job_id},
-        UpdateExpression='SET #s = :complete',
-        ExpressionAttributeNames={'#s': 'status'},
-        ExpressionAttributeValues={':complete': 'complete'}
-    )
-
-
 def invoke(function_name, payload):
     response = lambda_client.invoke(
         FunctionName=function_name,

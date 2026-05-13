@@ -25,9 +25,11 @@ passes; on-demand fields are populated by user-triggered actions.
   "description": string,
   "salary": string | null,
   "source": "indeed" | "linkedin" | "manual",
-  "status": "new" | "applied" | "interviewing" | "offer" | "rejected" | "archived",
+  "status": "new" | "applied" | "interviewing" | "offer" | "rejected",
   "scrapedAt": ISO 8601 string,
   "postingDate": ISO 8601 string | null,
+  "status_changed_at": ISO 8601 string,   // optional; written server-side on every status change
+  "archived_at": ISO 8601 string,          // optional; present only when the job is archived
 
   // Screening pass output — populated by job-screener Lambda on DDB INSERT
   "company_id": string (comp_<uuid>, FK to companies table),
@@ -82,6 +84,23 @@ passes; on-demand fields are populated by user-triggered actions.
   "ingestion_error": string     // only present when ingestion_status = "failed", truncated to 500 chars
 }
 ```
+
+### Notes on archive and status-change timestamps
+
+- `archived_at` is the master exclusion flag for the active buckets (Screened, Analysed, Applied).
+  Any job with `archived_at` set is excluded from those views regardless of any other field.
+  It is absent on active jobs and present only on archived jobs. Never infer archive state from
+  `status` — use `archived_at` as the sole source of truth.
+- `archived_at` is written by two paths: the `POST /jobs/{id}/archive` endpoint (manual dismiss),
+  and automatically by `PUT /jobs/{id}/status` when the new status is `rejected`.
+- `status_changed_at` is written server-side on every call to `PUT /jobs/{id}/status`.
+  The frontend does not write to this field directly. Used by the Applied bucket and Archive view
+  for sort order.
+- Setting status to `rejected` automatically sets `archived_at` server-side in the same update call.
+  A rejected job can be manually restored via `POST /jobs/{id}/restore` (removes `archived_at`),
+  at which point it appears in the Applied bucket (status is still `rejected`).
+- `archived` is no longer a valid value for the `status` field. Archiving is a separate operation
+  from status progression.
 
 ### Notes on the URL ingestion fields
 

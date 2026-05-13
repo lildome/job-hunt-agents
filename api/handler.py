@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Key, Attr
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -20,6 +20,10 @@ JOB_URL_INGESTION_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/
 
 LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
 LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
+
+VALID_STATUSES = {'new', 'applied', 'interviewing', 'offer', 'rejected'}
+APPLIED_STATUSES = ['applied', 'interviewing', 'offer', 'rejected']
+VALID_BUCKETS = {'screened', 'analysed', 'applied', 'archive'}
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 lambda_client = boto3.client('lambda', region_name='us-east-1')
@@ -134,48 +138,90 @@ def invoke_lambda(function_name, payload):
     )
     return json.loads(result['Payload'].read())
 
+def _bucket_filter_expr(bucket):
+    not_archived = Attr('archived_at').not_exists()
+    not_failed = Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
+
+    if bucket == 'screened':
+        return (
+            not_archived & not_failed &
+            (Attr('analysis.status').not_exists() | Attr('analysis.status').ne('complete'))
+        )
+    if bucket == 'analysed':
+        return (
+            not_archived & not_failed &
+            Attr('analysis.status').exists() &
+            Attr('analysis.status').eq('complete') &
+            ~Attr('status').is_in(APPLIED_STATUSES)
+        )
+    if bucket == 'applied':
+        return (
+            not_archived & not_failed &
+            Attr('status').is_in(APPLIED_STATUSES)
+        )
+    if bucket == 'archive':
+        return Attr('archived_at').exists() & not_failed
+
+
+def _scan_all(filter_expr, select=None):
+    kwargs = {'FilterExpression': filter_expr}
+    if select:
+        kwargs['Select'] = select
+    result = jobs_table.scan(**kwargs)
+    if select == 'COUNT':
+        total = result.get('Count', 0)
+        while 'LastEvaluatedKey' in result:
+            result = jobs_table.scan(**kwargs, ExclusiveStartKey=result['LastEvaluatedKey'])
+            total += result.get('Count', 0)
+        return total
+    items = result.get('Items', [])
+    while 'LastEvaluatedKey' in result:
+        result = jobs_table.scan(**kwargs, ExclusiveStartKey=result['LastEvaluatedKey'])
+        items.extend(result.get('Items', []))
+    return items
+
+
+def _attach_canonical_names(items):
+    company_ids = list({j['company_id'] for j in items if j.get('company_id')})
+    id_to_canonical = {}
+    for i in range(0, len(company_ids), 100):
+        batch = company_ids[i:i + 100]
+        resp = dynamodb.batch_get_item(
+            RequestItems={
+                'companies': {
+                    'Keys': [{'id': cid} for cid in batch],
+                    'ProjectionExpression': 'id, canonical_name',
+                }
+            }
+        )
+        for item in resp.get('Responses', {}).get('companies', []):
+            id_to_canonical[item['id']] = item.get('canonical_name')
+    for j in items:
+        j['canonical_name'] = id_to_canonical.get(j.get('company_id'))
+
+
 def get_jobs(event, auth):
     if auth == 'invalid':
         return response(401, {'error': 'Unauthorized'})
 
     params = event.get('queryStringParameters') or {}
-    status_filter = params.get('status')
-    min_score = params.get('min_score')
+    bucket = params.get('bucket')
 
-    result = jobs_table.scan()
-    items = result.get('Items', [])
+    if not bucket:
+        return response(400, {'error': "bucket query parameter is required"})
+    if bucket not in VALID_BUCKETS:
+        return response(400, {'error': f"Invalid bucket '{bucket}'. Must be one of: screened, analysed, applied, archive"})
 
-    if status_filter:
-        items = [i for i in items if i.get('status') == status_filter]
+    items = _scan_all(_bucket_filter_expr(bucket))
 
-    if min_score and auth == 'valid':
-        try:
-            threshold = int(min_score)
-            items = [i for i in items if int(i.get('match_score', 0)) >= threshold]
-        except (ValueError, TypeError):
-            pass
+    for item in items:
+        item.pop('description', None)
 
-    jobs = [
-        {
-            'id': i.get('id'),
-            'positionName': i.get('positionName'),
-            'company': i.get('company'),
-            'location': i.get('location'),
-            'match_score': i.get('match_score'),
-            'status': i.get('status'),
-            'scrapedAt': i.get('scrapedAt'),
-            'salary': i.get('summary', {}).get('salary') if isinstance(i.get('summary'), dict) else None,
-        }
-        for i in items
-    ]
-    jobs.sort(key=lambda x: int(x.get('match_score') or 0), reverse=True)
+    _attach_canonical_names(items)
 
-    if auth == 'absent':
-        for job in jobs:
-            job.pop('match_score', None)
-            job.pop('match_summary', None)
+    counts = {b: _scan_all(_bucket_filter_expr(b), select='COUNT') for b in VALID_BUCKETS}
 
-    return response(200, jobs)
+    return response(200, {'jobs': items, 'counts': counts})
 
 def get_job(job_id, auth):
     if auth == 'invalid':
@@ -212,13 +258,54 @@ def update_job_status(job_id, body):
     if not new_status:
         return response(400, {'error': 'status field required'})
 
+    if new_status == 'archived':
+        return response(400, {'error': "Use POST /jobs/{id}/archive to archive a job"})
+
+    if new_status not in VALID_STATUSES:
+        return response(400, {'error': f"Invalid status '{new_status}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"})
+
+    now = datetime.now(timezone.utc).isoformat()
+    update_expr = 'SET #s = :s, #sc = :sc'
+    expr_names = {'#s': 'status', '#sc': 'status_changed_at'}
+    expr_values = {':s': new_status, ':sc': now}
+
+    if new_status == 'rejected':
+        update_expr += ', #aa = :aa'
+        expr_names['#aa'] = 'archived_at'
+        expr_values[':aa'] = now
+
     jobs_table.update_item(
         Key={'id': job_id},
-        UpdateExpression='SET #s = :s',
-        ExpressionAttributeNames={'#s': 'status'},
-        ExpressionAttributeValues={':s': new_status}
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=expr_names,
+        ExpressionAttributeValues=expr_values,
     )
     return response(200, {'job_id': job_id, 'status': new_status})
+
+
+def archive_job(job_id):
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    jobs_table.update_item(
+        Key={'id': job_id},
+        UpdateExpression='SET archived_at = :t',
+        ExpressionAttributeValues={':t': datetime.now(timezone.utc).isoformat()},
+    )
+    return response(200, {'job_id': job_id})
+
+
+def restore_job(job_id):
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    jobs_table.update_item(
+        Key={'id': job_id},
+        UpdateExpression='REMOVE archived_at',
+    )
+    return response(200, {'job_id': job_id})
 
 def start_indeed_scrape(body):
     try:
@@ -562,6 +649,16 @@ def lambda_handler(event, context):
     m = re.match(r'^/jobs/([^/]+)/status$', path)
     if m and method == 'PUT':
         return update_job_status(m.group(1), body)
+
+    # POST /jobs/{id}/archive
+    m = re.match(r'^/jobs/([^/]+)/archive$', path)
+    if m and method == 'POST':
+        return archive_job(m.group(1))
+
+    # POST /jobs/{id}/restore
+    m = re.match(r'^/jobs/([^/]+)/restore$', path)
+    if m and method == 'POST':
+        return restore_job(m.group(1))
 
     # POST /jobs/{id}/resume
     m = re.match(r'^/jobs/([^/]+)/resume$', path)

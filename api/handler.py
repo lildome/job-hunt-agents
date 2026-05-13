@@ -4,7 +4,9 @@ import re
 import secrets
 import time
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 import boto3
+from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -14,6 +16,7 @@ S3_BUCKET = "dprofico-job-hunt-artifacts"
 STALE_THRESHOLD = timedelta(minutes=5)
 
 JOB_PROCESSING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue'
+JOB_URL_INGESTION_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-url-ingestion-queue'
 
 LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
 LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
@@ -454,6 +457,67 @@ def trigger_full_analysis(body):
     return response(status_code, {'accepted': accepted, 'rejected': rejected})
 
 
+def is_valid_url(url):
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def find_duplicate_job(url):
+    """Returns job_id of duplicate, or None if no duplicate exists."""
+    result = jobs_table.query(
+        IndexName='url-index',
+        KeyConditionExpression=Key('url').eq(url),
+        Limit=1,
+    )
+    items = result.get('Items', [])
+    return items[0]['id'] if items else None
+
+
+def ingest_from_urls(body):
+    try:
+        data = json.loads(body or '{}')
+    except json.JSONDecodeError:
+        return response(400, {'error': 'Invalid JSON body'})
+
+    urls = data.get('urls')
+    if not isinstance(urls, list) or len(urls) == 0:
+        return response(400, {'error': "'urls' must be a non-empty list"})
+    if not all(isinstance(u, str) for u in urls):
+        return response(400, {'error': "'urls' must be a list of strings"})
+
+    accepted = []
+    rejected = []
+    any_enqueue_succeeded = False
+
+    for url in urls:
+        if not is_valid_url(url):
+            rejected.append({'url': url, 'reason': 'malformed_url'})
+            continue
+
+        existing_id = find_duplicate_job(url)
+        if existing_id:
+            rejected.append({'url': url, 'reason': 'duplicate', 'existing_job_id': existing_id})
+            continue
+
+        try:
+            sqs.send_message(
+                QueueUrl=JOB_URL_INGESTION_QUEUE_URL,
+                MessageBody=json.dumps({'url': url}),
+            )
+            accepted.append(url)
+            any_enqueue_succeeded = True
+        except Exception as e:
+            logger.error(f"from-url: failed to enqueue {url}: {e}")
+            rejected.append({'url': url, 'reason': 'enqueue_failed'})
+
+    all_failed = len(accepted) == 0 and any(r['reason'] == 'enqueue_failed' for r in rejected)
+    status_code = 500 if all_failed else 200
+    return response(status_code, {'accepted': accepted, 'rejected': rejected})
+
+
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
     path = event.get('path', '')
@@ -512,6 +576,10 @@ def lambda_handler(event, context):
     # POST /jobs/full-analysis
     if method == 'POST' and path == '/jobs/full-analysis':
         return trigger_full_analysis(body)
+
+    # POST /jobs/from-url
+    if method == 'POST' and path == '/jobs/from-url':
+        return ingest_from_urls(body)
 
     # POST /scrape/indeed
     if method == 'POST' and path == '/scrape/indeed':

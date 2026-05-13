@@ -82,11 +82,6 @@ def lambda_handler(event, context):
 
             logger.info(f"Processing job_id: {job_id} ({job.get('company')} — {job.get('positionName')})")
 
-            jobs_table.update_item(
-                Key={'id': job_id},
-                UpdateExpression='SET analysis = :a',
-                ExpressionAttributeValues={':a': {"status" : "summarising"}}
-            )
             try:
                 # Step 1: Summarise
                 logger.info(f"Step 1/3: Summarising job {job_id}")
@@ -111,20 +106,21 @@ def lambda_handler(event, context):
                 # Step 3: CV match
                 logger.info(f"Step 3/3: Matching CV for job {job_id}")
                 invoke('cv-matcher', {'job_id': job_id})
-            except Exception as e:
-                logger.error(f"Error processing job {job_id}: {str(e)}")
+
                 jobs_table.update_item(
                     Key={'id': job_id},
                     UpdateExpression='SET analysis.status = :update',
-                    ExpressionAttributeValues={':update': "failed"}
+                    ExpressionAttributeValues={':update': "complete"}
                 )
-
-            complete_job(job_id)
-
-            jobs_table.update_item(
-                Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
-                ExpressionAttributeValues={':update': "complete"}
-            )
+            except Exception as e:
+                error_msg = str(e)[:500]
+                logger.error(f"Error processing job {job_id}: {error_msg}")
+                jobs_table.update_item(
+                    Key={'id': job_id},
+                    UpdateExpression='SET analysis.#s = :status, analysis.#e = :error',
+                    ExpressionAttributeNames={'#s': 'status', '#e': 'error'},
+                    ExpressionAttributeValues={':status': 'failed', ':error': error_msg}
+                )
+                
 
             logger.info(f"Processing complete for job_id: {job_id}")

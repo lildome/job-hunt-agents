@@ -187,7 +187,7 @@ def lambda_handler(event, context):
             logger.info(f"Resolved canonical name for {company_name}: {resolved_canonical}")
             companies_table.update_item(
                 Key={'id': company_id},
-                UpdateExpression='SET #aliases = list_append(if_not_exists(#aliases, :empty), :new)',
+                UpdateExpression='SET aliases = list_append(if_not_exists(aliases, :empty), :new)',
                 ExpressionAttributeValues={':new': [company_name], ':empty': []},
             )
             companies_table.update_item(
@@ -235,3 +235,4 @@ def lambda_handler(event, context):
         logger.info(f"Company information stored for: {resolved_canonical}")
     except Exception as e:
         logger.error(f"Error storing company information for {company_name}: {e}")
+        raise

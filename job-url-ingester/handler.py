@@ -142,3 +142,4 @@ def lambda_handler(event, context):
         f"Successfully ingested {url} as {job_id}: "
         f"{extracted['positionName']} @ {extracted['company']}"
     )
+    

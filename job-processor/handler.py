@@ -21,14 +21,19 @@ def deserialize_item(dynamo_item):
 
 
 def claim_job(job_id):
-    """Atomically transition status 'new' → 'processing'. Returns False if already claimed."""
+    """Atomically transition analysis.status to 'summarising' if pipeline hasn't started.
+    Returns False if the job is already being processed or has been processed."""
     try:
         jobs_table.update_item(
             Key={'id': job_id},
-            UpdateExpression='SET #s = :processing',
-            ConditionExpression='#s = :new',
+            UpdateExpression='SET analysis = :start',
+            ConditionExpression='attribute_not_exists(analysis) OR analysis.#s = :pending OR analysis.#s = :failed',
             ExpressionAttributeNames={'#s': 'status'},
-            ExpressionAttributeValues={':processing': 'processing', ':new': 'new'}
+            ExpressionAttributeValues={
+                ':start': {'status': 'summarising'},
+                ':pending': 'pending',
+                ':failed': 'failed',
+            }
         )
         return True
     except ClientError as e:
@@ -82,30 +87,37 @@ def lambda_handler(event, context):
                 UpdateExpression='SET analysis = :a',
                 ExpressionAttributeValues={':a': {"status" : "summarising"}}
             )
+            try:
+                # Step 1: Summarise
+                logger.info(f"Step 1/3: Summarising job {job_id}")
+                invoke('job-summariser', {'job_id': job_id})
 
-            # Step 1: Summarise
-            logger.info(f"Step 1/3: Summarising job {job_id}")
-            invoke('job-summariser', {'job_id': job_id})
+                jobs_table.update_item(
+                    Key={'id': job_id},
+                    UpdateExpression='SET analysis.status = :update',
+                    ExpressionAttributeValues={':update': "researching"}
+                )
 
-            jobs_table.update_item(
-                Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
-                ExpressionAttributeValues={':update': "researching"}
-            )
+                # Step 2: Company research
+                logger.info(f"Step 2/3: Researching company for job {job_id}")
+                invoke('company-researcher', {'job_id': job_id})
 
-            # Step 2: Company research
-            logger.info(f"Step 2/3: Researching company for job {job_id}")
-            invoke('company-researcher', {'job_id': job_id})
+                jobs_table.update_item(
+                    Key={'id': job_id},
+                    UpdateExpression='SET analysis.status = :update',
+                    ExpressionAttributeValues={':update': "matching"}
+                )
 
-            jobs_table.update_item(
-                Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
-                ExpressionAttributeValues={':update': "matching"}
-            )
-
-            # Step 3: CV match
-            logger.info(f"Step 3/3: Matching CV for job {job_id}")
-            invoke('cv-matcher', {'job_id': job_id})
+                # Step 3: CV match
+                logger.info(f"Step 3/3: Matching CV for job {job_id}")
+                invoke('cv-matcher', {'job_id': job_id})
+            except Exception as e:
+                logger.error(f"Error processing job {job_id}: {str(e)}")
+                jobs_table.update_item(
+                    Key={'id': job_id},
+                    UpdateExpression='SET analysis.status = :update',
+                    ExpressionAttributeValues={':update': "failed"}
+                )
 
             complete_job(job_id)
 

@@ -23,10 +23,10 @@ def is_research_needed(company_id):
     response = companies_table.get_item(Key={'id': company_id})
     if 'Item' not in response:
         return True
-    last_updated = response['Item'].get('last_updated')
-    if not last_updated:
+    research_last_updated = response['Item'].get('research_last_updated')
+    if not research_last_updated:
         return True
-    age = datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)
+    age = datetime.now(timezone.utc) - datetime.fromisoformat(research_last_updated)
     return age > timedelta(days=30)
 
 def get_parameter(name):
@@ -122,7 +122,7 @@ def lambda_handler(event, context):
 
     logger.info(f"Researching company: {company_id} for job: {job_id}")
 
-    company_name = company.get('company_name')
+    company_name = company.get('canonical_name')
 
     api_key = get_parameter('anthropic-api-key')
     client = anthropic.Anthropic(api_key=api_key, max_retries=8)
@@ -192,7 +192,7 @@ def lambda_handler(event, context):
             )
             companies_table.update_item(
                 Key={'id': company_id},
-                UpdateExpression='SET company_name = :cn',
+                UpdateExpression='SET canonical_name = :cn',
                 ExpressionAttributeValues={':cn': resolved_canonical}
             )
             mappings_table.put_item(Item={
@@ -211,16 +211,27 @@ def lambda_handler(event, context):
             'candidate_fit_score': company_information.get('candidate_fit_score', 0),
             'candidate_fit_reasoning': company_information.get('candidate_fit_reasoning', 'N/A'),
             'research_confidence': company_information.get('research_confidence', 'low'),
-            'last_updated': datetime.now(timezone.utc).isoformat(),
+            'research_last_updated': datetime.now(timezone.utc).isoformat(),
         }
-        for key, value in update_fields.items():
-            if value is not None:
-                companies_table.update_item(
-                    Key={'id': company_id},
-                    UpdateExpression=f'SET {key} = :val',
-                    ExpressionAttributeValues={':val': value}
-                )
 
+        set_clauses = []
+        expression_names = {}
+        expression_values = {}
+
+        for i, (key, value) in enumerate(update_fields.items()):
+            name_placeholder = f'#k{i}'
+            value_placeholder = f':v{i}'
+            set_clauses.append(f'{name_placeholder} = {value_placeholder}')
+            expression_names[name_placeholder] = key
+            expression_values[value_placeholder] = value
+
+        companies_table.update_item(
+            Key={'id': company_id},
+            UpdateExpression='SET ' + ', '.join(set_clauses),
+            ExpressionAttributeNames=expression_names,
+            ExpressionAttributeValues=expression_values,
+        )
+    
         logger.info(f"Company information stored for: {resolved_canonical}")
     except Exception as e:
         logger.error(f"Error storing company information for {company_name}: {e}")

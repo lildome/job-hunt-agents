@@ -13,12 +13,15 @@ PIN = "Job Hunt PIN 159075"
 S3_BUCKET = "dprofico-job-hunt-artifacts"
 STALE_THRESHOLD = timedelta(minutes=5)
 
+JOB_PROCESSING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue'
+
 LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
 LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 lambda_client = boto3.client('lambda', region_name='us-east-1')
 s3_client = boto3.client('s3', region_name='us-east-1')
+sqs = boto3.client('sqs', region_name='us-east-1')
 jobs_table = dynamodb.Table('jobs')
 companies_table = dynamodb.Table('companies')
 sessions_table = dynamodb.Table('sessions')
@@ -400,6 +403,57 @@ def get_cover_letter_download(job_id):
     return response(200, {'url': url})
 
 
+def trigger_full_analysis(body):
+    try:
+        data = json.loads(body or '{}')
+    except json.JSONDecodeError:
+        return response(400, {'error': 'Invalid JSON body'})
+
+    ids = data.get('ids')
+    if not isinstance(ids, list) or len(ids) == 0:
+        return response(400, {'error': "'ids' must be a non-empty list"})
+
+    accepted = []
+    rejected = []
+    any_enqueue_succeeded = False
+
+    for job_id in ids:
+        item = jobs_table.get_item(Key={'id': job_id}).get('Item')
+
+        if not item:
+            logger.info(f"full-analysis: {job_id} not found")
+            rejected.append({'job_id': job_id, 'reason': 'not_found'})
+            continue
+
+        analysis_status = (item.get('analysis') or {}).get('status')
+
+        if analysis_status in ('summarising', 'researching', 'matching'):
+            logger.info(f"full-analysis: {job_id} in_progress ({analysis_status})")
+            rejected.append({'job_id': job_id, 'reason': 'in_progress', 'current_status': analysis_status})
+            continue
+
+        if analysis_status == 'complete':
+            logger.info(f"full-analysis: {job_id} already_complete")
+            rejected.append({'job_id': job_id, 'reason': 'already_complete'})
+            continue
+
+        # analysis missing, pending, or failed — accept and enqueue
+        try:
+            sqs.send_message(
+                QueueUrl=JOB_PROCESSING_QUEUE_URL,
+                MessageBody=json.dumps({'job_id': job_id}),
+            )
+            accepted.append(job_id)
+            any_enqueue_succeeded = True
+        except Exception as e:
+            logger.error(f"full-analysis: failed to enqueue {job_id}: {e}")
+            rejected.append({'job_id': job_id, 'reason': 'enqueue_failed'})
+
+    all_failed = len(accepted) == 0 and any(r['reason'] == 'enqueue_failed' for r in rejected)
+    status_code = 500 if all_failed else 200
+    return response(status_code, {'accepted': accepted, 'rejected': rejected})
+
+
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
     path = event.get('path', '')
@@ -454,6 +508,10 @@ def lambda_handler(event, context):
     m = re.match(r'^/jobs/([^/]+)/cover-letter$', path)
     if m and method == 'POST':
         return generate_cover_letter(m.group(1), body)
+
+    # POST /jobs/full-analysis
+    if method == 'POST' and path == '/jobs/full-analysis':
+        return trigger_full_analysis(body)
 
     # POST /scrape/indeed
     if method == 'POST' and path == '/scrape/indeed':

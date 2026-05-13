@@ -75,9 +75,23 @@ passes; on-demand fields are populated by user-triggered actions.
   "cover_letter": string (markdown),
   "cover_letter_pdf_key": string (S3 key),
   "cover_letter_pdf_url_cached": string (presigned URL),
-  "cover_letter_pdf_url_generated_at": ISO 8601 string
+  "cover_letter_pdf_url_generated_at": ISO 8601 string,
+
+  // URL ingestion fields — only present for jobs submitted via POST /jobs/from-url
+  "ingestion_status": "success" | "failed",
+  "ingestion_error": string     // only present when ingestion_status = "failed", truncated to 500 chars
 }
 ```
+
+### Notes on the URL ingestion fields
+
+- `ingestion_status` and `ingestion_error` are written exclusively by the `job-url-ingester` Lambda.
+  Scraped jobs (source `"indeed"` or `"linkedin"`) never set these fields.
+- The EventBridge Pipe from the jobs DDB stream → `job-screening-queue` carries a filter that passes
+  only records where `ingestion_status` is absent or `"success"`. Records with `ingestion_status = "failed"`
+  sit inert in the table and never enter the screening or analysis pipeline.
+- A failed-ingestion record contains only `id`, `url`, `source`, `scrapedAt`, `ingestion_status`,
+  and `ingestion_error`. It has no `positionName`, `company`, `description`, or pipeline fields.
 
 ### Notes on the screening fields
 

@@ -181,23 +181,24 @@ def _scan_all(filter_expr, select=None):
     return items
 
 
-def _attach_canonical_names(items):
+def _attach_company_info(items):
     company_ids = list({j['company_id'] for j in items if j.get('company_id')})
-    id_to_canonical = {}
+    id_to_items = {}
     for i in range(0, len(company_ids), 100):
         batch = company_ids[i:i + 100]
         resp = dynamodb.batch_get_item(
             RequestItems={
                 'companies': {
                     'Keys': [{'id': cid} for cid in batch],
-                    'ProjectionExpression': 'id, canonical_name',
+                    'ProjectionExpression': 'id, canonical_name, candidate_fit_score',
                 }
             }
         )
         for item in resp.get('Responses', {}).get('companies', []):
-            id_to_canonical[item['id']] = item.get('canonical_name')
+            id_to_items[item['id']] = (item.get('canonical_name'), item.get('candidate_fit_score', None))
     for j in items:
-        j['canonical_name'] = id_to_canonical.get(j.get('company_id'))
+        j['canonical_name'] = id_to_items.get(j.get('company_id'), (None, None))[0]
+        j['candidate_fit_score'] = id_to_items.get(j.get('company_id'), (None, None))[1]
 
 
 def get_jobs(event, auth):
@@ -217,7 +218,7 @@ def get_jobs(event, auth):
     for item in items:
         item.pop('description', None)
 
-    _attach_canonical_names(items)
+    _attach_company_info(items)
 
     counts = {b: _scan_all(_bucket_filter_expr(b), select='COUNT') for b in VALID_BUCKETS}
 

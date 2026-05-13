@@ -143,3 +143,4 @@ def lambda_handler(event, context):
         f"{extracted['positionName']} @ {extracted['company']}"
     )
     
+    

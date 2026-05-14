@@ -28,8 +28,9 @@ passes; on-demand fields are populated by user-triggered actions.
   "status": "new" | "applied" | "interviewing" | "offer" | "rejected",
   "scrapedAt": ISO 8601 string,
   "postingDate": ISO 8601 string | null,
-  "status_changed_at": ISO 8601 string,   // optional; written server-side on every status change
-  "archived_at": ISO 8601 string,          // optional; present only when the job is archived
+  "status_changed_at": ISO 8601 string,        // optional; written server-side on every status change
+  "archived_at": ISO 8601 string,              // optional; present only when the job is archived
+  "analysis_completed_at": ISO 8601 string,    // optional; written by job-processor when analysis pipeline completes successfully
 
   // Screening pass output — populated by job-screener Lambda on DDB INSERT
   "company_id": string (comp_<uuid>, FK to companies table),
@@ -101,6 +102,15 @@ passes; on-demand fields are populated by user-triggered actions.
   at which point it appears in the Applied bucket (status is still `rejected`).
 - `archived` is no longer a valid value for the `status` field. Archiving is a separate operation
   from status progression.
+
+### Notes on `analysis_completed_at`
+
+- Written exclusively by `job-processor` when the full analysis pipeline (summarise → research → match) completes
+  without error — i.e., on the same update that sets `analysis.status` to `"complete"`.
+- Top-level field, not nested under `analysis`, consistent with `archived_at` and `status_changed_at`.
+- Absent on jobs that have not yet completed analysis. Frontend reads this field to display "Analysed N days ago"
+  in the Analysed bucket list view. Treat absence as unknown — do not infer a timestamp from other fields.
+- Never written on the failed-status path.
 
 ### Notes on the URL ingestion fields
 

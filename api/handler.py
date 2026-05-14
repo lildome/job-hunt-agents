@@ -17,6 +17,7 @@ STALE_THRESHOLD = timedelta(minutes=5)
 
 JOB_PROCESSING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue'
 JOB_URL_INGESTION_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-url-ingestion-queue'
+JOB_SCREENING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-screening-queue'
 
 LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
 LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
@@ -37,7 +38,7 @@ profiles_table = dynamodb.Table('candidate_profiles')
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type,X-Session-Token',
-    'Access-Control-Allow-Methods': 'GET,PUT,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
     'Content-Type': 'application/json'
 }
 
@@ -558,6 +559,129 @@ def trigger_full_analysis(body):
     return response(status_code, {'accepted': accepted, 'rejected': rejected})
 
 
+def _dispatch_retry(job):
+    """Determine the retry action for a job and execute it.
+    Returns ('accepted', None) or ('rejected', reason_string).
+    """
+    job_id = job['id']
+
+    # Path 1: failed ingestion — delete record, re-enqueue URL
+    if job.get('ingestion_status') == 'failed':
+        url = job.get('url')
+        if not url:
+            return ('rejected', 'missing_url')
+        try:
+            jobs_table.delete_item(Key={'id': job_id})
+        except Exception as e:
+            logger.error(f"retry: delete failed for ingestion {job_id}: {e}")
+            return ('rejected', 'delete_failed')
+        try:
+            sqs.send_message(
+                QueueUrl=JOB_URL_INGESTION_QUEUE_URL,
+                MessageBody=json.dumps({'url': url}),
+            )
+        except Exception as e:
+            logger.error(f"retry: enqueue failed for ingestion {job_id} (record already deleted): {e}")
+            return ('rejected', 'enqueue_failed')
+        return ('accepted', None)
+
+    analysis_status = (job.get('analysis') or {}).get('status')
+    has_screening = bool(job.get('screening'))
+
+    # Path 2: no screening block — re-trigger screening
+    if not has_screening:
+        try:
+            sqs.send_message(
+                QueueUrl=JOB_SCREENING_QUEUE_URL,
+                MessageBody=json.dumps({'job_id': job_id}),
+            )
+        except Exception as e:
+            logger.error(f"retry: enqueue failed for screening {job_id}: {e}")
+            return ('rejected', 'enqueue_failed')
+        return ('accepted', None)
+
+    # Path 3: screened, no analysis attempted — not stuck
+    if analysis_status is None:
+        return ('rejected', 'nothing_to_retry')
+
+    # Path 4: already complete
+    if analysis_status == 'complete':
+        return ('rejected', 'already_complete')
+
+    # Path 5: in-flight (stuck) — reset to failed before enqueueing
+    if analysis_status in ('summarising', 'researching', 'matching'):
+        try:
+            jobs_table.update_item(
+                Key={'id': job_id},
+                UpdateExpression='SET analysis.#s = :s',
+                ExpressionAttributeNames={'#s': 'status'},
+                ExpressionAttributeValues={':s': 'failed'},
+            )
+        except Exception as e:
+            logger.error(f"retry: failed to reset analysis status for {job_id}: {e}")
+            return ('rejected', 'enqueue_failed')
+
+    # Paths 5, 6 (failed), 7 (pending) — enqueue to processing queue
+    try:
+        sqs.send_message(
+            QueueUrl=JOB_PROCESSING_QUEUE_URL,
+            MessageBody=json.dumps({'job_id': job_id}),
+        )
+    except Exception as e:
+        logger.error(f"retry: enqueue failed for processing {job_id}: {e}")
+        return ('rejected', 'enqueue_failed')
+
+    return ('accepted', None)
+
+
+def retry_jobs(body):
+    try:
+        data = json.loads(body or '{}')
+    except json.JSONDecodeError:
+        return response(400, {'error': 'Invalid JSON body'})
+
+    ids = data.get('ids')
+    if not isinstance(ids, list) or len(ids) == 0:
+        return response(400, {'error': "'ids' must be a non-empty list"})
+
+    accepted = []
+    rejected = []
+    any_enqueue_succeeded = False
+
+    for job_id in ids:
+        item = jobs_table.get_item(Key={'id': job_id}).get('Item')
+
+        if not item:
+            rejected.append({'job_id': job_id, 'reason': 'not_found'})
+            continue
+
+        outcome, reason = _dispatch_retry(item)
+
+        if outcome == 'accepted':
+            accepted.append(job_id)
+            any_enqueue_succeeded = True
+        else:
+            rejected.append({'job_id': job_id, 'reason': reason})
+
+    all_failed = len(accepted) == 0 and any(
+        r['reason'] in ('enqueue_failed', 'delete_failed') for r in rejected
+    )
+    status_code = 500 if all_failed else 200
+    return response(status_code, {'accepted': accepted, 'rejected': rejected})
+
+
+def delete_failed_ingestion(job_id):
+    item = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not item:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    if item.get('ingestion_status') != 'failed':
+        return response(400, {'error': 'This endpoint only deletes failed-ingestion records'})
+
+    jobs_table.delete_item(Key={'id': job_id})
+    return response(200, {'job_id': job_id})
+
+
 def is_valid_url(url):
     try:
         parsed = urlparse(url)
@@ -567,11 +691,11 @@ def is_valid_url(url):
 
 
 def find_duplicate_job(url):
-    """Returns job_id of duplicate, or None if no duplicate exists."""
+    """Returns job_id of a non-failed duplicate, or None if no duplicate exists."""
     result = jobs_table.query(
         IndexName='url-index',
         KeyConditionExpression=Key('url').eq(url),
-        Limit=1,
+        FilterExpression=Attr('ingestion_status').ne('failed') | Attr('ingestion_status').not_exists(),
     )
     items = result.get('Items', [])
     return items[0]['id'] if items else None
@@ -684,6 +808,11 @@ def lambda_handler(event, context):
     if auth != 'valid':
         return response(401, {'error': 'Unauthorized'})
 
+    # DELETE /jobs/{id}
+    m = re.match(r'^/jobs/([^/]+)$', path)
+    if m and method == 'DELETE':
+        return delete_failed_ingestion(m.group(1))
+
     # PUT /jobs/{id}/status
     m = re.match(r'^/jobs/([^/]+)/status$', path)
     if m and method == 'PUT':
@@ -712,6 +841,10 @@ def lambda_handler(event, context):
     # POST /jobs/full-analysis
     if method == 'POST' and path == '/jobs/full-analysis':
         return trigger_full_analysis(body)
+
+    # POST /jobs/retry
+    if method == 'POST' and path == '/jobs/retry':
+        return retry_jobs(body)
 
     # POST /jobs/from-url
     if method == 'POST' and path == '/jobs/from-url':

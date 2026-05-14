@@ -217,8 +217,18 @@ def get_jobs(event, auth):
 
     for item in items:
         item.pop('description', None)
+        if auth == 'absent':
+            item.pop('analysis', None)
+            item.pop('screening', None)
+            for key in list(item.keys()):
+                if key.startswith('tailored_resume_') or key.startswith('cover_letter_'):
+                    del item[key]
 
     _attach_company_info(items)
+
+    if auth == 'absent':
+        for item in items:
+            item.pop('candidate_fit_score', None)
 
     counts = {b: _scan_all(_bucket_filter_expr(b), select='COUNT') for b in VALID_BUCKETS}
 
@@ -232,13 +242,16 @@ def get_job(job_id, auth):
     if not job:
         return response(404, {'error': f'Job {job_id} not found'})
 
-    company_name = job.get('company', '')
-    canonical_name = job.get('canonical_company_name', company_name)
-    company = companies_table.get_item(Key={'company_name': canonical_name}).get('Item', {})
+    company_id = job.get('company_id')
+    company = {}
+    if company_id:
+        company = companies_table.get_item(Key={'id': company_id}).get('Item', {})
 
     if auth == 'absent':
-        for field in ('match_score', 'match_summary', 'tailored_resume', 'cover_letter'):
-            job.pop(field, None)
+        job.pop('analysis', None)
+        for key in list(job.keys()):
+            if key.startswith('tailored_resume_') or key.startswith('cover_letter_'):
+                del job[key]
         for field in ('candidate_fit_score', 'candidate_fit_reasoning'):
             company.pop(field, None)
 
@@ -606,6 +619,27 @@ def ingest_from_urls(body):
     return response(status_code, {'accepted': accepted, 'rejected': rejected})
 
 
+def get_failed_ingestions(auth):
+    if auth == 'invalid':
+        return response(401, {'error': 'Unauthorized'})
+
+    filter_expr = Attr('ingestion_status').eq('failed')
+    items = _scan_all(filter_expr)
+
+    result = [
+        {
+            'id': item['id'],
+            'url': item.get('url'),
+            'ingestion_error': item.get('ingestion_error'),
+            'scrapedAt': item.get('scrapedAt'),
+        }
+        for item in items
+    ]
+    result.sort(key=lambda x: x.get('scrapedAt', ''), reverse=True)
+
+    return response(200, result)
+
+
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
     path = event.get('path', '')
@@ -627,6 +661,10 @@ def lambda_handler(event, context):
     # GET /jobs
     if method == 'GET' and path == '/jobs':
         return get_jobs(event, auth)
+
+    # GET /jobs/failed-ingestions
+    if method == 'GET' and path == '/jobs/failed-ingestions':
+        return get_failed_ingestions(auth)
 
     # GET /jobs/{id}
     m = re.match(r'^/jobs/([^/]+)$', path)

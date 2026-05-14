@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
@@ -85,8 +86,9 @@ def lambda_handler(event, context):
 
             jobs_table.update_item(
                 Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
-                ExpressionAttributeValues={':update': "complete"}
+                UpdateExpression='SET analysis.#s = :s, #t = :t',
+                ExpressionAttributeNames={'#s': 'status', '#t': 'analysis_completed_at'},
+                ExpressionAttributeValues={':s': 'complete', ':t': datetime.now(timezone.utc).isoformat()},
             )
         except Exception as e:
             error_msg = str(e)[:500]

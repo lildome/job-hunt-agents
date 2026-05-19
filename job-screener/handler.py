@@ -8,7 +8,7 @@ from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
 from google import genai
 from google.genai import types
-from google.api_core.exceptions import ResourceExhausted
+from google.genai.errors import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -184,9 +184,12 @@ description: {description}
                         contents=user_message,
                         config=config,
                     )
-                except ResourceExhausted:
-                    logger.warning(f"Rate limited screening {position_name} at {raw_company_name} — waiting 65s before retry")
-                    time.sleep(65)
+                except ClientError as e:
+                    if e.code == 429:  # Rate limit exceeded
+                        logger.warning(f"Rate limited screening {position_name} at {raw_company_name} — waiting 65s before retry")
+                        time.sleep(65)
+                    else:
+                        raise
                     response = gemini_client.models.generate_content(
                         model="gemini-2.5-flash",
                         contents=user_message,

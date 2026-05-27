@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.types import TypeSerializer
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -34,6 +35,8 @@ jobs_table = dynamodb.Table('jobs')
 companies_table = dynamodb.Table('companies')
 sessions_table = dynamodb.Table('sessions')
 profiles_table = dynamodb.Table('candidate_profiles')
+
+_serializer = TypeSerializer()
 
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -588,12 +591,14 @@ def _dispatch_retry(job):
     analysis_status = (job.get('analysis') or {}).get('status')
     has_screening = bool(job.get('screening'))
 
-    # Path 2: no screening block — re-trigger screening
+    # Path 2: no screening block — re-trigger screening.
+    # job-screener consumes a DynamoDB-stream INSERT shape, not {job_id}; send the
+    # serialized job as a synthetic stream record (see _to_stream_record).
     if not has_screening:
         try:
             sqs.send_message(
                 QueueUrl=JOB_SCREENING_QUEUE_URL,
-                MessageBody=json.dumps({'job_id': job_id}),
+                MessageBody=json.dumps(_to_stream_record(job), default=str),
             )
         except Exception as e:
             logger.error(f"retry: enqueue failed for screening {job_id}: {e}")
@@ -668,6 +673,108 @@ def retry_jobs(body):
     )
     status_code = 500 if all_failed else 200
     return response(status_code, {'accepted': accepted, 'rejected': rejected})
+
+
+def _to_stream_record(job: dict) -> dict:
+    """Rebuild the DynamoDB-stream INSERT shape that job-screener expects.
+
+    job-screener reads record['dynamodb']['NewImage'] and runs it through a
+    boto3 TypeDeserializer. The real EventBridge Pipe delivers NewImage in
+    DynamoDB-JSON ({"id": {"S": "..."}}), but a resource-level scan() (and the
+    get_item in _dispatch_retry) returns already-deserialized Python values
+    ({"id": "..."}). So we re-serialize the item to reconstruct the wire shape
+    the screener deserializes.
+
+    Only eventName and dynamodb.NewImage are populated — those are the only
+    fields the screener touches.
+    """
+    new_image = {k: _serializer.serialize(v) for k, v in job.items()}
+    return {
+        'eventName': 'INSERT',
+        'dynamodb': {'NewImage': new_image},
+    }
+
+
+def _is_stuck_screening(job: dict) -> bool:
+    """A job is stuck in the screening pass if it has no screening block at all,
+    or its screening explicitly failed. 'pending' is treated as possibly-in-flight
+    and left alone; 'complete' is done. Failed-ingestion records are never screened.
+    """
+    if job.get('ingestion_status') == 'failed':
+        return False
+    screening = job.get('screening')
+    if not screening:
+        return True
+    return screening.get('status') == 'failed'
+
+
+def rescreen_stuck_jobs():
+    """Bulk-requeue every job stuck in the screening pass.
+
+    Scans the jobs table, selects jobs that are missing a screening block or whose
+    screening failed (excluding failed-ingestion records), and re-enqueues each one
+    to job-screening-queue as a synthetic DynamoDB-stream INSERT record. The screener
+    is idempotent for these jobs because they never reached screening.status=complete,
+    so company job_count is not double-counted.
+
+    Returns {accepted, rejected, count} consistent with the other bulk endpoints.
+    """
+    not_archived = Attr('archived_at').not_exists()
+    not_failed_ingestion = (
+        Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
+    )
+    no_screening_or_failed = (
+        Attr('screening').not_exists() | Attr('screening.status').eq('failed')
+    )
+    filter_expr = not_archived & not_failed_ingestion & no_screening_or_failed
+
+    items = _scan_all(filter_expr)
+
+    # Defensive second pass in Python — guarantees the exact stuck definition even if
+    # the scan filter is loosened later, and drops anything without an id.
+    stuck = [j for j in items if j.get('id') and _is_stuck_screening(j)]
+
+    accepted = []
+    rejected = []
+
+    # SQS send_message_batch takes at most 10 entries per call.
+    for i in range(0, len(stuck), 10):
+        chunk = stuck[i:i + 10]
+        entries = []
+        entry_id_to_job_id = {}
+        for n, job in enumerate(chunk):
+            entry_id = str(n)
+            entry_id_to_job_id[entry_id] = job['id']
+            entries.append({
+                'Id': entry_id,
+                'MessageBody': json.dumps(_to_stream_record(job), default=str),
+            })
+
+        try:
+            resp = sqs.send_message_batch(
+                QueueUrl=JOB_SCREENING_QUEUE_URL,
+                Entries=entries,
+            )
+        except Exception as e:
+            logger.error(f"rescreen-stuck: batch send failed: {e}")
+            for job in chunk:
+                rejected.append({'job_id': job['id'], 'reason': 'enqueue_failed'})
+            continue
+
+        for ok in resp.get('Successful', []):
+            accepted.append(entry_id_to_job_id[ok['Id']])
+        for bad in resp.get('Failed', []):
+            jid = entry_id_to_job_id.get(bad['Id'], 'unknown')
+            logger.error(f"rescreen-stuck: enqueue failed for {jid}: {bad.get('Message')}")
+            rejected.append({'job_id': jid, 'reason': 'enqueue_failed'})
+
+    all_failed = len(accepted) == 0 and len(rejected) > 0
+    status_code = 500 if all_failed else 200
+    return response(status_code, {
+        'accepted': accepted,
+        'rejected': rejected,
+        'count': len(accepted),
+    })
 
 
 def delete_failed_ingestion(job_id):
@@ -845,6 +952,10 @@ def lambda_handler(event, context):
     # POST /jobs/retry
     if method == 'POST' and path == '/jobs/retry':
         return retry_jobs(body)
+
+    # POST /jobs/rescreen-stuck
+    if method == 'POST' and path == '/jobs/rescreen-stuck':
+        return rescreen_stuck_jobs()
 
     # POST /jobs/from-url
     if method == 'POST' and path == '/jobs/from-url':

@@ -164,6 +164,31 @@ like LangChain or CrewAI.
   longer retry intervals, processing jobs one at a time (MaximumConcurrency=1 
   not supported by SQS — minimum is 2)
 
+### [Post-build] — Bulk re-screen endpoint + job-screener message-shape fix
+**What:** Added `POST /jobs/rescreen-stuck` to the `api` Lambda. It scans the
+  jobs table for jobs stuck in the screening pass — those with no `screening`
+  block or with `screening.status == "failed"`, excluding failed-ingestion
+  records — and re-enqueues each to `job-screening-queue` via
+  `send_message_batch`. Returns `{accepted, rejected, count}`. Pending and
+  complete screenings are left untouched (pending may be in flight). No
+  "re-screen all" mode by design. Also fixed a latent bug in `_dispatch_retry`
+  (the `POST /jobs/retry` path): both the new endpoint and the existing Path 2
+  now build messages via a shared `_to_stream_record` helper.
+**Why:** After fixing a screening-pass bug, previously-failed and never-screened
+  jobs needed a way to be reprocessed in bulk without a frontend control. While
+  building it, discovered that `job-screener` consumes a DynamoDB-stream INSERT
+  shape (`{eventName, dynamodb.NewImage}`, deserialized via TypeDeserializer),
+  matching the EventBridge Pipe's `<$.dynamodb>` input template — but the
+  existing retry Path 2 was enqueuing `{"job_id": ...}`, which the screener
+  silently skips (no `eventName == "INSERT"`), so per-job re-screen via Retry
+  never actually ran. The shared helper re-serializes a resource-level item back
+  into DynamoDB-JSON so the screener's deserializer reconstructs it correctly.
+**Alternatives considered:** Invoking `job-screener` directly (bypasses the
+  queue's concurrency control); a plain `{job_id}` contract with a screener-side
+  change to accept it (larger blast radius — the screener is also driven by the
+  live Pipe, which can't easily send that shape); including `pending` jobs in the
+  stuck set (risks double-processing genuinely in-flight jobs).
+
 ### [Post-build] — Company Researcher moved into sequential pipeline
 **What:** Company Researcher now runs as the second step inside job-processor 
   (after job-summariser, before cv-matcher), replacing its own dedicated 

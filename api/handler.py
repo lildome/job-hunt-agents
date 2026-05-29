@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 PIN = "Job Hunt PIN 159075"
 S3_BUCKET = "dprofico-job-hunt-artifacts"
 STALE_THRESHOLD = timedelta(minutes=5)
+PENDING_SCREENING_STUCK_AFTER = timedelta(minutes=10)
 
 JOB_PROCESSING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-processing-queue'
 JOB_URL_INGESTION_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-url-ingestion-queue'
@@ -696,16 +697,39 @@ def _to_stream_record(job: dict) -> dict:
 
 
 def _is_stuck_screening(job: dict) -> bool:
-    """A job is stuck in the screening pass if it has no screening block at all,
-    or its screening explicitly failed. 'pending' is treated as possibly-in-flight
-    and left alone; 'complete' is done. Failed-ingestion records are never screened.
+    """A job is stuck in the screening pass if any of the following hold:
+      - It has no screening block at all.
+      - Its screening explicitly failed.
+      - Its screening has been 'pending' for longer than PENDING_SCREENING_STUCK_AFTER,
+        which means the screener Lambda almost certainly died silently
+        (unhandled exceptions write a 'failed' status before re-raising, so
+        permanent 'pending' means the container died before that could run).
+      - Its screening is 'pending' with no started_at timestamp at all. These are
+        pre-timestamp records; since this endpoint is run manually, treat them as
+        stuck and let the human decide when to invoke.
+
+    Failed-ingestion records are never screened. 'complete' is done.
     """
     if job.get('ingestion_status') == 'failed':
         return False
     screening = job.get('screening')
     if not screening:
         return True
-    return screening.get('status') == 'failed'
+
+    status = screening.get('status')
+    if status == 'failed':
+        return True
+    if status == 'pending':
+        started_at = screening.get('started_at')
+        if not started_at:
+            return True
+        try:
+            started = datetime.fromisoformat(started_at)
+        except (ValueError, TypeError):
+            return True
+        return datetime.now(timezone.utc) - started > PENDING_SCREENING_STUCK_AFTER
+
+    return False
 
 
 def rescreen_stuck_jobs():
@@ -723,10 +747,12 @@ def rescreen_stuck_jobs():
     not_failed_ingestion = (
         Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
     )
-    no_screening_or_failed = (
-        Attr('screening').not_exists() | Attr('screening.status').eq('failed')
+    # Broaden to "anything not 'complete'" — the precise stuck definition (failed,
+    # missing, or stale-pending) is enforced in _is_stuck_screening on the Python side.
+    not_complete = (
+        Attr('screening').not_exists() | Attr('screening.status').ne('complete')
     )
-    filter_expr = not_archived & not_failed_ingestion & no_screening_or_failed
+    filter_expr = not_archived & not_failed_ingestion & not_complete
 
     items = _scan_all(filter_expr)
 

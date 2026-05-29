@@ -202,6 +202,28 @@ like LangChain or CrewAI.
 **Alternatives considered:** Keep Company Researcher on separate Pipe A 
   (retained original parallel design)
 
+### [Post-build] — Pending-screening timeout detection
+**What:** Extended `_is_stuck_screening` in the `api` Lambda to also treat
+  `screening.status == "pending"` as stuck when older than 10 minutes, and added
+  a corresponding `started_at` timestamp written by `job-screener` when it
+  transitions a job to pending. Bulk re-screen endpoint scan filter widened to
+  "anything not complete" so the Python-side check sees pending candidates;
+  precise stuck definition (failed / missing / stale-pending) remains in
+  `_is_stuck_screening`. Pre-timestamp pending records (written before this
+  change) are treated as stuck.
+**Why:** A previous version of the endpoint left `pending` alone on the
+  assumption it might be in flight. In practice, the screener can die silently
+  (container OOM, function timeout) before its `except` block can write
+  `'failed'`, leaving jobs permanently `pending` with no recovery path. The
+  10-minute threshold sits comfortably above the legitimate worst-case
+  duration (~75s: one rate-limit sleep plus two Gemini calls plus DDB ops)
+  and is conservative enough to never collide with an in-flight job.
+**Alternatives considered:** Including all `pending` unconditionally (would
+  double-screen in-flight jobs, inflating company job_count); using `scrapedAt`
+  as a proxy for pending age (breaks on re-screened jobs whose scrapedAt is
+  stale); tighter threshold of 2-5 minutes (less safety margin for no real gain
+  given manual invocation).
+
 ---
 
 ## Agent Decisions

@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -154,7 +155,10 @@ def lambda_handler(event, context):
             jobs_table.update_item(
                 Key={'id': job_id},
                 UpdateExpression='SET screening = :s',
-                ExpressionAttributeValues={':s': {'status': 'pending'}}
+                ExpressionAttributeValues={':s': {
+                    'status': 'pending',
+                    'started_at': datetime.now(timezone.utc).isoformat(),
+                }}
             )
 
             try:

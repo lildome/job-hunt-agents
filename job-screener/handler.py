@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import uuid
+import random
 from datetime import datetime, timezone
 
 import boto3
@@ -9,7 +10,7 @@ from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
 from google import genai
 from google.genai import types
-from google.genai.errors import ClientError
+from google.genai.errors import ClientError, ServerError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -26,7 +27,6 @@ def _get_parameter(name):
     response = ssm.get_parameter(Name=name, WithDecryption=True)
     return response['Parameter']['Value']
 
-# NOTE: Free-tier Gemini prompts may be used by Google for model training.
 gemini_client = genai.Client(api_key=_get_parameter('gemini-api-key'))
 
 SCREENING_SYSTEM_PROMPT = """You are helping a software engineer screen scraped job listings to decide which are worth investigating further. Your job is to produce a fast first-pass score for each job — fast enough that every scraped job can be processed cheaply, accurate enough that the candidate can confidently skip the jobs you flag as poor fits.
@@ -181,24 +181,33 @@ description: {description}
                     response_schema=SCREENING_RESPONSE_SCHEMA,
                     system_instruction=SCREENING_SYSTEM_PROMPT,
                 )
-
-                try:
-                    response = gemini_client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=user_message,
-                        config=config,
-                    )
-                except ClientError as e:
-                    if e.code == 429:  # Rate limit exceeded
-                        logger.warning(f"Rate limited screening {position_name} at {raw_company_name} — waiting 65s before retry")
-                        time.sleep(65)
-                    else:
-                        raise
-                    response = gemini_client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=user_message,
-                        config=config,
-                    )
+                
+                for attempt in range(3):
+                    try:
+                        response = gemini_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=user_message,
+                            config=config,
+                        )
+                        break  # Success, exit retry loop
+                    except ClientError as e:
+                        if e.code == 429 and attempt < 2:  # Rate limit exceeded
+                            logger.warning(f"Rate limited screening {position_name} at {raw_company_name} — waiting 65s before retry")
+                            time.sleep(65)
+                        else:
+                            raise
+                        response = gemini_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=user_message,
+                            config=config,
+                        )
+                    except ServerError as e:
+                        if e.code == 503 and attempt < 2:
+                            wait = 30 * (2 ** attempt) + random.uniform(0, 5)
+                            logger.warning(f"Model overloaded for {position_name} at {raw_company_name} — waiting {wait:.1f}s before retry (attempt {attempt + 1}/3)")
+                            time.sleep(wait)
+                        else:
+                            raise
 
                 result = json.loads(response.text)
                 model_canonical = result['canonical_company_name']

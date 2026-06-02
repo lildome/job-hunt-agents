@@ -24,6 +24,10 @@ JOB_SCREENING_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/052732928292/job-
 LINKEDIN_REMOTE_VALUES = {'onsite', 'remote', 'hybrid'}
 LINKEDIN_POSTED_WITHIN_VALUES = {'day', '3days', 'week', 'month'}
 
+# Seek accepts the same enum values for these fields; reuse the LinkedIn sets.
+SEEK_REMOTE_VALUES = LINKEDIN_REMOTE_VALUES
+SEEK_POSTED_WITHIN_VALUES = LINKEDIN_POSTED_WITHIN_VALUES
+
 VALID_STATUSES = {'new', 'applied', 'interviewing', 'offer', 'rejected'}
 APPLIED_STATUSES = ['applied', 'interviewing', 'offer', 'rejected']
 VALID_BUCKETS = {'screened', 'analysed', 'applied', 'archive'}
@@ -403,6 +407,61 @@ def start_linkedin_scrape(body):
         }).encode()
     )
     logger.info(f"LinkedIn scrape triggered: {search_params} count={count}")
+    return response(202, {'message': 'Scrape started', 'search_params': search_params, 'count': count})
+
+def start_seek_scrape(body):
+    try:
+        data = json.loads(body or '{}')
+    except json.JSONDecodeError:
+        return response(400, {'error': 'Invalid JSON body'})
+
+    keywords = data.get('keywords', '').strip()
+    if not keywords:
+        return response(400, {'error': 'keywords is required'})
+
+    location = data.get('location', '').strip()
+    if not location:
+        return response(400, {'error': 'location is required'})
+
+    search_params = {'keywords': keywords, 'location': location}
+
+    if 'remote' in data:
+        if data['remote'] not in SEEK_REMOTE_VALUES:
+            return response(400, {'error': f"Invalid 'remote' value. Allowed: {sorted(SEEK_REMOTE_VALUES)}"})
+        search_params['remote'] = data['remote']
+
+    if 'posted_within' in data:
+        if data['posted_within'] not in SEEK_POSTED_WITHIN_VALUES:
+            return response(400, {'error': f"Invalid 'posted_within' value. Allowed: {sorted(SEEK_POSTED_WITHIN_VALUES)}"})
+        search_params['posted_within'] = data['posted_within']
+
+    if 'state' in data and data['state']:
+        search_params['state'] = data['state'].strip()
+    if 'postCode' in data and data['postCode']:
+        search_params['postCode'] = str(data['postCode']).strip()
+    if 'radius' in data and data['radius']:
+        try:
+            search_params['radius'] = int(data['radius'])
+        except (ValueError, TypeError):
+            return response(400, {'error': 'radius must be an integer'})
+
+    count = 100
+    if 'count' in data:
+        try:
+            count = int(data['count'])
+        except (ValueError, TypeError):
+            return response(400, {'error': 'count must be an integer'})
+
+    lambda_client.invoke(
+        FunctionName='job-scraper',
+        InvocationType='Event',
+        Payload=json.dumps({
+            'job_board': 'seek',
+            'search_params': search_params,
+            'count': count,
+        }).encode()
+    )
+    logger.info(f"Seek scrape triggered: {search_params} count={count}")
     return response(202, {'message': 'Scrape started', 'search_params': search_params, 'count': count})
 
 def tailor_resume(job_id):
@@ -999,6 +1058,10 @@ def lambda_handler(event, context):
     # POST /scrape/linkedin
     if method == 'POST' and path == '/scrape/linkedin':
         return start_linkedin_scrape(body)
+
+    # POST /scrape/seek
+    if method == 'POST' and path == '/scrape/seek':
+        return start_seek_scrape(body)
 
     # GET /jobs/{id}/resume/download
     m = re.match(r'^/jobs/([^/]+)/resume/download$', path)

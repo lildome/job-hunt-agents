@@ -4,6 +4,7 @@ import boto3
 from apify_client import ApifyClient
 from scrapers.indeed_scraper import scrape_indeed
 from scrapers.linkedin_scraper import scrape_linkedin
+from scrapers.seek_scraper import scrape_seek
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -31,6 +32,8 @@ def lambda_handler(event, context):
         result = scrape_indeed(client, event['run_input'])
     elif job_board == 'linkedin':
         result = scrape_linkedin(client, event['search_params'], event.get('count', 50))
+    elif job_board == 'seek':
+        result = scrape_seek(client, event['search_params'], event.get('count', 100))
     else:
         return {
             'statusCode': 400,

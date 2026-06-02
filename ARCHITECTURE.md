@@ -87,6 +87,31 @@ like LangChain or CrewAI.
 **Why:** Indeed working end-to-end, wanted to move on to agent development. 
   Can revisit if Apify costs become an issue.
 
+### [Post-build] — Seek scraper added as third source
+**What:** Added a Seek scraper module (`job-scraper/scrapers/seek_scraper.py`)
+  using the `websift/seek-job-scraper` Apify actor ($2.50/1000 results). New
+  API endpoint `POST /scrape/seek` mirrors LinkedIn's parameter shape
+  (`keywords`, `location`, `remote`, `posted_within`, `count`) plus three
+  Seek-specific optional fields (`state`, `postCode`, `radius`).
+**Why:** Seek is the dominant job board for Australia-based companies and was
+  missing from a scraper set otherwise dominated by US-oriented sources. The
+  cost is trivial at single-user scale (~$0.25 per 100-job scrape) and the
+  actor reliably returns plain-text descriptions via a `sections` array,
+  avoiding HTML parsing.
+**Alternatives considered:** `automation-lab/seek-scraper` and
+  `blackfalcondata/seek-scraper` (compared separately, websift's pay-per-row
+  pricing model fit best for variable-volume use); writing a raw Playwright
+  scraper (Seek has active anti-scraping protections, not worth it).
+
+Mapping decisions worth noting (these may not be obvious from the code):
+  - Company name: prefer `companyProfile.name`, fall back to `advertiser.name`
+    when companyProfile is missing or literally `"N/A"` (Seek often advertises
+    on behalf of a hiring company via a recruitment agency).
+  - Description: joins the actor's `sections` array with newlines rather than
+    parsing `unEditedContent` HTML — same content, no parsing risk.
+  - Location: uses `joblocationInfo.displayLocation` (`"City STATE"`) to
+    match Indeed's existing format.
+
 ---
 
 ## Database Decisions

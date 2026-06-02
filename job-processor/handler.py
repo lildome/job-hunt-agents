@@ -91,7 +91,8 @@ def lambda_handler(event, context):
 
             jobs_table.update_item(
                 Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
+                UpdateExpression='SET analysis.#s = :update',
+                ExpressionAttributeNames={'#s': 'status'},
                 ExpressionAttributeValues={':update': "researching"}
             )
 
@@ -101,7 +102,8 @@ def lambda_handler(event, context):
 
             jobs_table.update_item(
                 Key={'id': job_id},
-                UpdateExpression='SET analysis.status = :update',
+                UpdateExpression='SET analysis.#s = :update',
+                ExpressionAttributeNames={'#s': 'status'},
                 ExpressionAttributeValues={':update': "matching"}
             )
 

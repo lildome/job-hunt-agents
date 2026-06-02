@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
@@ -36,12 +37,36 @@ def claim_job(job_id):
             return False
         raise
 
+INIT_RETRY_ERRORS = ('CodeArtifactUserPendingException', 'ResourceConflictException')
+
+
 def invoke(function_name, payload):
-    response = lambda_client.invoke(
-        FunctionName=function_name,
-        InvocationType='RequestResponse',
-        Payload=json.dumps(payload).encode()
-    )
+    """Synchronously invoke a downstream Lambda, retrying transient
+    container-init errors. Cold-start races between Lambdas in a chain
+    surface as CodeArtifactUserPendingException — the target function exists
+    but its container image hasn't finished initialising yet.
+    """
+    response = None
+    for attempt in range(3):
+        try:
+            response = lambda_client.invoke(
+                FunctionName=function_name,
+                InvocationType='RequestResponse',
+                Payload=json.dumps(payload).encode()
+            )
+            break
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code in INIT_RETRY_ERRORS and attempt < 2:
+                wait = 5 * (2 ** attempt)  # 5s, 10s
+                logger.warning(
+                    f"{function_name} still initialising ({code}), "
+                    f"retrying in {wait}s (attempt {attempt + 1}/3)"
+                )
+                time.sleep(wait)
+                continue
+            raise
+
     result = json.loads(response['Payload'].read())
     if result and 'errorMessage' in result:
         raise RuntimeError(f"{function_name} failed: {result['errorMessage']}")

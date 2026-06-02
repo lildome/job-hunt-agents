@@ -148,15 +148,20 @@ def _bucket_filter_expr(bucket):
     not_failed = Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
 
     if bucket == 'screened':
+        # Screened: analysis has never been attempted (no analysis block, or status 'pending').
+        # Once any analysis state is reached (summarising/researching/matching/complete/failed),
+        # the job moves to Analysed.
         return (
             not_archived & not_failed &
-            (Attr('analysis.status').not_exists() | Attr('analysis.status').ne('complete'))
+            (Attr('analysis.status').not_exists() | Attr('analysis.status').eq('pending'))
         )
     if bucket == 'analysed':
+        # Analysed: analysis has been initiated. Includes in-flight (summarising/researching/matching),
+        # complete, and failed. Excludes applied (those move to the Applied bucket).
         return (
             not_archived & not_failed &
             Attr('analysis.status').exists() &
-            Attr('analysis.status').eq('complete') &
+            Attr('analysis.status').is_in(['summarising', 'researching', 'matching', 'complete', 'failed']) &
             ~Attr('status').is_in(APPLIED_STATUSES)
         )
     if bucket == 'applied':

@@ -224,6 +224,25 @@ like LangChain or CrewAI.
   stale); tighter threshold of 2-5 minutes (less safety margin for no real gain
   given manual invocation).
 
+### [Post-build] — Bucket semantics: intent-based rather than terminal-state
+**What:** Changed the Screened and Analysed bucket filters in `_bucket_filter_expr`.
+  Screened is now "analysis has never been attempted" (no analysis block, or
+  status `pending`). Analysed is now "analysis has been initiated, regardless
+  of current state" — in-flight (`summarising`/`researching`/`matching`),
+  `complete`, and `failed` all live in Analysed. Applied and Archive buckets
+  are unchanged.
+**Why:** The prior definition (Screened = "not complete," Analysed = "complete")
+  treated bucket membership as a function of where data is in the pipeline.
+  In practice the more useful mental model is intent: once the user has clicked
+  "Run full analysis," that job has left the triage queue and they want to see
+  its progress alongside other analyses, not back in the queue of untouched jobs.
+  Failed-analysis jobs likewise belong with their peers in Analysed, where the
+  retry path is visible, rather than re-cluttering Screened.
+**Alternatives considered:** Keep terminal-state semantics and surface in-flight
+  progress via a separate UI affordance in Screened (clutters the triage queue);
+  add a fifth "in-progress" bucket (proliferation, and failed jobs would still
+  need a home).
+
 ---
 
 ## Agent Decisions

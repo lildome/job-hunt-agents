@@ -74,7 +74,7 @@ def _build_tailor_user_prompt(job: dict, company: dict, cv: dict) -> str:
         pref_block = f"\n<candidate_preferences>\n{json.dumps(preferences, indent=2)}\n</candidate_preferences>\n"
 
     return (
-        f"<job_summary>\n{json.dumps(job.get('summary', {}), indent=2)}\n</job_summary>\n\n"
+        f"<job_summary>\n{json.dumps(job.get('analysis', {}).get('summary', {}), indent=2)}\n</job_summary>\n\n"
         f"<company_context>\n"
         f"culture_notes: {json.dumps(company.get('culture_notes', []))}\n"
         f"candidate_fit_reasoning: {company.get('candidate_fit_reasoning', 'N/A')}\n"
@@ -370,7 +370,7 @@ def lambda_handler(event, context):
         job = jobs_table.get_item(Key={"id": job_id}).get("Item")
         if not job:
             raise ValueError(f"Job {job_id} not found")
-        if "summary" not in job:
+        if "summary" not in job.get("analysis", {}):
             raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
 
         company_id = job.get("company_id")

@@ -37,7 +37,7 @@ def _build_autonomous_user_prompt(job: dict, company: dict, cv: dict) -> str:
 
     return (
         f"<today>{today}</today>\n\n"
-        f"<job_summary>\n{json.dumps(job.get('summary', {}), indent=2)}\n</job_summary>\n\n"
+        f"<job_summary>\n{json.dumps(job.get('analysis', {}).get('summary', {}), indent=2)}\n</job_summary>\n\n"
         f"<company_context>\n"
         f"company_name: {job.get('company', '')}\n"
         f"culture_notes: {json.dumps(company.get('culture_notes', []))}\n"
@@ -60,7 +60,7 @@ def _build_revision_user_prompt(job: dict, company: dict, cv: dict,
 
     return (
         f"<today>{today}</today>\n\n"
-        f"<job_summary>\n{json.dumps(job.get('summary', {}), indent=2)}\n</job_summary>\n\n"
+        f"<job_summary>\n{json.dumps(job.get('analysis', {}).get('summary', {}), indent=2)}\n</job_summary>\n\n"
         f"<company_context>\n"
         f"company_name: {job.get('company', '')}\n"
         f"culture_notes: {json.dumps(company.get('culture_notes', []))}\n"

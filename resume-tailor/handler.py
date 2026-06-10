@@ -373,9 +373,11 @@ def lambda_handler(event, context):
         if "summary" not in job:
             raise ValueError(f"Job {job_id} has no summary — run job-summariser first")
 
-        company = companies_table.get_item(
-            Key={"company_name": job.get("company", "")}
-        ).get("Item", {})
+        company_id = job.get("company_id")
+        company = (
+            companies_table.get_item(Key={"id": company_id}).get("Item", {})
+            if company_id else {}
+        )
 
         cv = profiles_table.get_item(Key={"profile_id": "primary"}).get("Item", {})
 

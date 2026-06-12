@@ -36,7 +36,7 @@ def _build_run_input(search_params: dict, count: int) -> dict:
         "searchTerm": search_params["keywords"],
         "location": search_params["location"],
         "maxResults": count,
-        "sortBy": "date",
+        "sortBy": "ListedDate",
     }
 
     if "remote" in search_params:

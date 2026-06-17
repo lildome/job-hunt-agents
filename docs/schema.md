@@ -36,6 +36,7 @@ passes; on-demand fields are populated by user-triggered actions.
   "company_id": string (comp_<uuid>, FK to companies table),
   "screening": {
     "status": "pending" | "complete" | "failed",
+    "role_summary": string (one paragraph);
     "canonical_name_confidence": "low" | "mid" | "high",
     "match_score": integer 1-10,
     "match_reasoning": string (one paragraph),

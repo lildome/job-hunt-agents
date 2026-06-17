@@ -65,8 +65,9 @@ You are also responsible for resolving the company's canonical name. The canonic
 
 Output a confidence level alongside the canonical name: high when you're certain (well-known company, obvious resolution), mid when your resolution is reasonable but you can't fully verify it, low when the company is unfamiliar to you. When confidence is low, return the raw scraped company name unchanged.
 
-Return a single JSON object with the following fields, in this order:
+Return a single JSON object with the following fields, in this order. Produce the fields in the order given. In particular, write role_summary first, before scoring: articulating what the role is before judging it produces more grounded scores.
 
+role_summary (string, 4-5 sentences): a plain, factual description of what this role is and its major responsibilities — enough that the candidate can decide whether the job is worth a deeper look without opening the original listing. Describe the role neutrally, as though the candidate did not exist: what the team or function does, the core responsibilities, the seniority and scope, and any defining characteristics of the work itself. Do NOT evaluate fit, reference the candidate's background, or justify the scores — that is the job of the reasoning fields below. This field answers "what is this job"; the reasoning fields answer "is it right for this candidate." Do not reproduce the job description; summarise it.
 match_score (integer 1-10): the technical match score per the rules above.
 match_reasoning (string, one paragraph): the reasoning for the match score, citing specific elements of the candidate's background and the role's requirements.
 recommendation_score (integer 1-10): the recommendation score per the rules above.
@@ -83,6 +84,7 @@ Don't describe your evaluation process — produce the output directly."""
 SCREENING_RESPONSE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
+        "role_summary": types.Schema(type=types.Type.STRING),
         "match_score": types.Schema(type=types.Type.INTEGER, minimum=1, maximum=10),
         "match_reasoning": types.Schema(type=types.Type.STRING),
         "recommendation_score": types.Schema(type=types.Type.INTEGER, minimum=1, maximum=10),
@@ -95,6 +97,7 @@ SCREENING_RESPONSE_SCHEMA = types.Schema(
         ),
     },
     required=[
+        "role_summary",
         "match_score",
         "match_reasoning",
         "recommendation_score",
@@ -104,6 +107,7 @@ SCREENING_RESPONSE_SCHEMA = types.Schema(
         "canonical_name_confidence",
     ],
     property_ordering=[
+        "role_summary",
         "match_score",
         "match_reasoning",
         "recommendation_score",
@@ -291,6 +295,7 @@ description: {description}
 
                 screening = {
                     'status': 'complete',
+                    'role_summary': result['role_summary'],
                     'canonical_name_confidence': result['canonical_name_confidence'],
                     'match_score': result['match_score'],
                     'match_reasoning': result['match_reasoning'],

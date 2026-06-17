@@ -12,6 +12,8 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ClientError, ServerError
 
+from dedup import is_duplicate, classify_type, normalise_posting_date
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -297,15 +299,152 @@ description: {description}
                     'divergence_reasoning': result['divergence_reasoning'],
                 }
 
-                jobs_table.update_item(
-                    Key={'id': job_id},
-                    UpdateExpression='SET screening = :s, company_id = :c',
-                    ExpressionAttributeValues={':s': screening, ':c': company_id}
+                # --- Duplicate detection ---
+                # Query all same-company jobs that have a complete screening and are
+                # not themselves folded duplicates. Sort by scrapedAt asc so
+                # first-seen wins deterministically.
+                gsi_jobs_result = jobs_table.query(
+                    IndexName='company-id-index',
+                    KeyConditionExpression=Key('company_id').eq(company_id),
                 )
-                logger.info(
-                    f"Screening complete for {job_id}: "
-                    f"match={result['match_score']}, rec={result['recommendation_score']}"
-                )
+                candidates = [
+                    j for j in gsi_jobs_result.get('Items', [])
+                    if j['id'] != job_id
+                    and isinstance(j.get('screening'), dict)
+                    and j['screening'].get('status') == 'complete'
+                    and 'duplicate_of' not in j
+                ]
+                candidates.sort(key=lambda j: j.get('scrapedAt', ''))
+
+                incoming_dict = {
+                    'title': position_name,
+                    'match_score': result['match_score'],
+                    'source': job.get('source'),
+                    'posting_date': job.get('postingDate'),
+                }
+
+                survivor = None
+                match_method = None
+                for cand in candidates:
+                    cand_dict = {
+                        'title': cand.get('positionName', ''),
+                        'match_score': cand['screening']['match_score'],
+                        'source': cand.get('source'),
+                        'posting_date': cand.get('postingDate'),
+                    }
+                    dup, method = is_duplicate(incoming_dict, cand_dict)
+                    if dup:
+                        survivor = cand
+                        survivor_dict = cand_dict
+                        match_method = method
+                        break
+
+                if survivor is None:
+                    # Step 3a — new canonical job. job_count was already bumped in step 4d above.
+                    jobs_table.update_item(
+                        Key={'id': job_id},
+                        UpdateExpression='SET screening = :s, company_id = :c',
+                        ExpressionAttributeValues={':s': screening, ':c': company_id}
+                    )
+                    logger.info(
+                        f"Screening complete for {job_id}: "
+                        f"match={result['match_score']}, rec={result['recommendation_score']}"
+                    )
+                else:
+                    # Step 3b — fold into survivor: undo the job_count bump
+                    companies_table.update_item(
+                        Key={'id': company_id},
+                        UpdateExpression='ADD job_count :dec',
+                        ExpressionAttributeValues={':dec': -1},
+                    )
+
+                    dup_type = classify_type(incoming_dict, survivor_dict)
+                    score_delta = abs(result['match_score'] - survivor['screening']['match_score'])
+                    now_iso = datetime.now(timezone.utc).isoformat()
+
+                    new_sighting = {
+                        'id': job_id,
+                        'positionName': position_name,
+                        'location': location,
+                        'url': job.get('url'),
+                        'source': job.get('source'),
+                        'postingDate': job.get('postingDate'),
+                        'scrapedAt': job.get('scrapedAt'),
+                        'screening': screening,
+                        'type': dup_type,
+                        'match_method': match_method,
+                        'score_delta': score_delta,
+                        'folded_at': now_iso,
+                        'times_seen': 1,
+                    }
+
+                    # Self-dedup pass: check if this is a re-scrape of an already-folded sighting
+                    existing_sightings = survivor.get('sightings', [])
+                    incoming_norm_date = normalise_posting_date(
+                        job.get('postingDate'), job.get('source', '')
+                    )
+                    merged_into_existing = False
+                    for existing_sighting in existing_sightings:
+                        if existing_sighting.get('source') == job.get('source'):
+                            sighting_norm_date = normalise_posting_date(
+                                existing_sighting.get('postingDate'),
+                                existing_sighting.get('source', ''),
+                            )
+                            if incoming_norm_date and sighting_norm_date == incoming_norm_date:
+                                # Re-scrape of an already-folded sighting — increment times_seen
+                                existing_sighting['times_seen'] = existing_sighting.get('times_seen', 1) + 1
+                                merged_into_existing = True
+                                logger.info(
+                                    f"Job {job_id} is re-scrape of existing sighting in survivor "
+                                    f"{survivor['id']} — incrementing times_seen"
+                                )
+                                break
+
+                    if not merged_into_existing:
+                        existing_sightings = existing_sightings + [new_sighting]
+
+                    # Build survivor update expression
+                    if dup_type == 2:
+                        # Update listing-pointer fields to reflect the freshest live listing
+                        survivor_update_expr = (
+                            'SET sightings = :sightings, '
+                            '#url = :url, #source = :source, '
+                            'postingDate = :postingDate, scrapedAt = :scrapedAt'
+                        )
+                        survivor_update_values = {
+                            ':sightings': existing_sightings,
+                            ':url': job.get('url'),
+                            ':source': job.get('source'),
+                            ':postingDate': job.get('postingDate'),
+                            ':scrapedAt': job.get('scrapedAt'),
+                        }
+                        jobs_table.update_item(
+                            Key={'id': survivor['id']},
+                            UpdateExpression=survivor_update_expr,
+                            ExpressionAttributeNames={'#url': 'url', '#source': 'source'},
+                            ExpressionAttributeValues=survivor_update_values,
+                        )
+                    else:
+                        # Type 1 — same posting, update sightings only
+                        jobs_table.update_item(
+                            Key={'id': survivor['id']},
+                            UpdateExpression='SET sightings = :sightings',
+                            ExpressionAttributeValues={':sightings': existing_sightings},
+                        )
+
+                    # Mark incoming job as folded; do NOT write a screening block
+                    # TODO: _bucket_filter_expr in api/handler.py should also add
+                    #   Attr('duplicate_of').not_exists() for robustness. The API's
+                    #   get_jobs/get_job may also want to surface sightings from survivor records.
+                    jobs_table.update_item(
+                        Key={'id': job_id},
+                        UpdateExpression='SET duplicate_of = :d, company_id = :c',
+                        ExpressionAttributeValues={':d': survivor['id'], ':c': company_id},
+                    )
+                    logger.info(
+                        f"Job {job_id} folded into survivor {survivor['id']} "
+                        f"(type={dup_type}, method={match_method}, delta={score_delta})"
+                    )
 
             except Exception as e:
                 error_msg = str(e)[:500]

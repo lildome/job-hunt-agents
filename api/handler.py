@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 from boto3.dynamodb.types import TypeSerializer
+from dedup import is_duplicate, classify_type, normalise_posting_date
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -961,6 +962,302 @@ def get_failed_ingestions(auth):
     return response(200, result)
 
 
+def _survivor_rank(job: dict) -> tuple:
+    """Lower tuple → higher priority survivor. Ties broken by earliest scrapedAt."""
+    analysis_complete = 0 if (job.get('analysis') or {}).get('status') == 'complete' else 1
+    has_applied_status = 0 if job.get('status') in ('applied', 'interviewing', 'offer', 'rejected') else 1
+    has_work = 0 if any(
+        k.startswith('tailored_resume_') or k.startswith('cover_letter_')
+        for k in job
+    ) else 1
+    scraped = job.get('scrapedAt', '')
+    return (analysis_complete, has_applied_status, has_work, scraped)
+
+
+def _build_comparison(job: dict) -> dict:
+    screening = job.get('screening') or {}
+    return {
+        'title': job.get('positionName', ''),
+        'match_score': screening.get('match_score', 0),
+        'source': job.get('source', ''),
+        'posting_date': job.get('postingDate'),
+    }
+
+
+def _cluster_jobs(jobs: list) -> list:
+    """Group jobs into duplicate clusters. Returns list of {'survivor': job, 'members': [job, ...]}
+    for clusters that have at least one member. Survivor selection is applied after initial grouping."""
+    # Sort ascending by scrapedAt so earlier records are processed first
+    sorted_jobs = sorted(jobs, key=lambda j: j.get('scrapedAt', ''))
+
+    # clusters: list of {'head': job, 'members': [job, ...], 'all': [job, ...]}
+    clusters = []
+
+    for job in sorted_jobs:
+        comp = _build_comparison(job)
+        matched_cluster = None
+        for cluster in clusters:
+            head_comp = _build_comparison(cluster['head'])
+            dupe, _ = is_duplicate(comp, head_comp)
+            if dupe:
+                matched_cluster = cluster
+                break
+        if matched_cluster is not None:
+            matched_cluster['members'].append(job)
+            matched_cluster['all'].append(job)
+        else:
+            clusters.append({'head': job, 'members': [], 'all': [job]})
+
+    result = []
+    for cluster in clusters:
+        if not cluster['members']:
+            continue
+        # Re-rank all jobs in cluster to pick true survivor
+        all_jobs = cluster['all']
+        all_jobs_ranked = sorted(all_jobs, key=_survivor_rank)
+        survivor = all_jobs_ranked[0]
+        members = [j for j in all_jobs_ranked if j is not survivor]
+        result.append({'survivor': survivor, 'members': members})
+
+    return result
+
+
+def _compute_sighting(member: dict, survivor: dict) -> dict:
+    """Build a sighting record for a member being folded into survivor."""
+    member_comp = _build_comparison(member)
+    survivor_comp = _build_comparison(survivor)
+    _, match_method = is_duplicate(member_comp, survivor_comp)
+    type_val = classify_type(member_comp, survivor_comp)
+    score_delta = member_comp['match_score'] - survivor_comp['match_score']
+    return {
+        'source': member.get('source'),
+        'url': member.get('url'),
+        'postingDate': member.get('postingDate'),
+        'scrapedAt': member.get('scrapedAt'),
+        'screening': member.get('screening'),
+        'type': type_val,
+        'match_method': match_method,
+        'score_delta': score_delta,
+        'folded_at': datetime.now(timezone.utc).isoformat(),
+        'times_seen': 1,
+    }
+
+
+def _type2_listing_updates(survivor: dict, members: list) -> dict:
+    """Return url/source/postingDate/scrapedAt from the most recent Type 2 member."""
+    type2_members = []
+    for member in members:
+        mc = _build_comparison(member)
+        sc = _build_comparison(survivor)
+        if classify_type(mc, sc) == 2:
+            type2_members.append(member)
+    if not type2_members:
+        return {}
+    # Pick freshest by postingDate, falling back to scrapedAt
+    freshest = max(
+        type2_members,
+        key=lambda m: (
+            normalise_posting_date(m.get('postingDate'), m.get('source', '')) or '',
+            m.get('scrapedAt', ''),
+        ),
+    )
+    updates = {}
+    for field in ('url', 'source', 'postingDate', 'scrapedAt'):
+        val = freshest.get(field)
+        if val is not None:
+            updates[field] = val
+    return updates
+
+
+def dedup_preview():
+    """Dry-run bulk dedup: returns proposed clusters without writing anything."""
+    filter_expr = (
+        Attr('screening.status').eq('complete') &
+        (Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')) &
+        Attr('duplicate_of').not_exists()
+    )
+    jobs = _scan_all(filter_expr)
+    logger.info(f"dedup-preview: {len(jobs)} eligible jobs")
+
+    # Group by company_id
+    by_company: dict = {}
+    for job in jobs:
+        cid = job.get('company_id', '__none__')
+        by_company.setdefault(cid, []).append(job)
+
+    # Look up canonical names in one batch
+    company_ids = [cid for cid in by_company if cid != '__none__']
+    cid_to_name = {}
+    for i in range(0, len(company_ids), 100):
+        batch = company_ids[i:i + 100]
+        resp = dynamodb.batch_get_item(
+            RequestItems={
+                'companies': {
+                    'Keys': [{'id': cid} for cid in batch],
+                    'ProjectionExpression': 'id, canonical_name',
+                }
+            }
+        )
+        for item in resp.get('Responses', {}).get('companies', []):
+            cid_to_name[item['id']] = item.get('canonical_name')
+
+    clusters_out = []
+    for cid, company_jobs in by_company.items():
+        clusters = _cluster_jobs(company_jobs)
+        for cluster in clusters:
+            survivor = cluster['survivor']
+            members = cluster['members']
+            s_screening = survivor.get('screening') or {}
+            survivor_shape = {
+                'id': survivor['id'],
+                'positionName': survivor.get('positionName'),
+                'source': survivor.get('source'),
+                'postingDate': survivor.get('postingDate'),
+                'scrapedAt': survivor.get('scrapedAt'),
+                'match_score': s_screening.get('match_score'),
+            }
+            members_shape = []
+            for member in members:
+                m_screening = member.get('screening') or {}
+                mc = _build_comparison(member)
+                sc = _build_comparison(survivor)
+                _, match_method = is_duplicate(mc, sc)
+                type_val = classify_type(mc, sc)
+                score_delta = mc['match_score'] - sc['match_score']
+                members_shape.append({
+                    'id': member['id'],
+                    'positionName': member.get('positionName'),
+                    'source': member.get('source'),
+                    'postingDate': member.get('postingDate'),
+                    'scrapedAt': member.get('scrapedAt'),
+                    'match_score': m_screening.get('match_score'),
+                    'type': type_val,
+                    'match_method': match_method,
+                    'score_delta': score_delta,
+                })
+            clusters_out.append({
+                'company_id': cid if cid != '__none__' else None,
+                'canonical_name': cid_to_name.get(cid),
+                'survivor': survivor_shape,
+                'members': members_shape,
+                'survivor_field_updates': _type2_listing_updates(survivor, members),
+            })
+
+    total_duplicates = sum(len(c['members']) for c in clusters_out)
+    logger.info(f"dedup-preview: {len(clusters_out)} clusters, {total_duplicates} duplicates")
+    return response(200, {
+        'clusters': clusters_out,
+        'cluster_count': len(clusters_out),
+        'total_duplicates': total_duplicates,
+    })
+
+
+def dedup_apply():
+    """Execute bulk dedup merges: fold members into survivors and mark them duplicate_of."""
+    filter_expr = (
+        Attr('screening.status').eq('complete') &
+        (Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')) &
+        Attr('duplicate_of').not_exists()
+    )
+    jobs = _scan_all(filter_expr)
+    logger.info(f"dedup-apply: {len(jobs)} eligible jobs")
+
+    by_company: dict = {}
+    for job in jobs:
+        cid = job.get('company_id', '__none__')
+        by_company.setdefault(cid, []).append(job)
+
+    now = datetime.now(timezone.utc).isoformat()
+    accepted = []
+    rejected = []
+    clusters_applied = 0
+
+    for cid, company_jobs in by_company.items():
+        clusters = _cluster_jobs(company_jobs)
+        for cluster in clusters:
+            survivor = cluster['survivor']
+            members = cluster['members']
+            survivor_id = survivor['id']
+
+            existing_sightings = list(survivor.get('sightings') or [])
+
+            new_sightings = []
+            for member in members:
+                sighting = _compute_sighting(member, survivor)
+                # Self-dedup: same source + same normalised posting date → bump times_seen
+                norm_date = normalise_posting_date(sighting.get('postingDate'), sighting.get('source', ''))
+                merged = False
+                for existing in existing_sightings:
+                    ex_norm = normalise_posting_date(existing.get('postingDate'), existing.get('source', ''))
+                    if existing.get('source') == sighting.get('source') and ex_norm == norm_date and norm_date is not None:
+                        existing['times_seen'] = existing.get('times_seen', 1) + 1
+                        merged = True
+                        break
+                if not merged:
+                    new_sightings.append(sighting)
+
+            all_sightings = existing_sightings + new_sightings
+
+            # Type 2 listing-field updates on survivor
+            field_updates = _type2_listing_updates(survivor, members)
+
+            # Build UpdateExpression for survivor
+            update_parts = ['#sightings = :sightings']
+            expr_names = {'#sightings': 'sightings'}
+            expr_values = {':sightings': all_sightings}
+
+            for field in ('url', 'source', 'postingDate', 'scrapedAt'):
+                if field in field_updates:
+                    placeholder = f'#{field}'
+                    expr_names[placeholder] = field
+                    expr_values[f':{field}'] = field_updates[field]
+                    update_parts.append(f'{placeholder} = :{field}')
+
+            try:
+                jobs_table.update_item(
+                    Key={'id': survivor_id},
+                    UpdateExpression='SET ' + ', '.join(update_parts),
+                    ExpressionAttributeNames=expr_names,
+                    ExpressionAttributeValues=expr_values,
+                )
+            except Exception as e:
+                logger.error(f"dedup-apply: failed to update survivor {survivor_id}: {e}")
+                for member in members:
+                    rejected.append({'job_id': member['id'], 'reason': 'survivor_update_failed'})
+                continue
+
+            # Mark each member as duplicate_of survivor
+            for member in members:
+                member_id = member['id']
+                try:
+                    jobs_table.update_item(
+                        Key={'id': member_id},
+                        UpdateExpression='SET duplicate_of = :sid',
+                        ExpressionAttributeValues={':sid': survivor_id},
+                    )
+                    accepted.append(member_id)
+                except Exception as e:
+                    logger.error(f"dedup-apply: failed to mark {member_id} as duplicate: {e}")
+                    rejected.append({'job_id': member_id, 'reason': 'mark_failed'})
+
+            # TODO: job_count on company records may be overcounted on existing data
+            # (each member was counted when first screened). A future pass could recompute.
+
+            clusters_applied += 1
+
+    all_failed = len(accepted) == 0 and any(
+        r['reason'] in ('survivor_update_failed', 'mark_failed') for r in rejected
+    )
+    status_code = 500 if all_failed else 200
+    logger.info(f"dedup-apply: {clusters_applied} clusters, {len(accepted)} folded, {len(rejected)} failed")
+    return response(status_code, {
+        'accepted': accepted,
+        'rejected': rejected,
+        'count': len(accepted),
+        'clusters_applied': clusters_applied,
+    })
+
+
 def lambda_handler(event, context):
     method = event.get('httpMethod', '')
     path = event.get('path', '')
@@ -1050,6 +1347,14 @@ def lambda_handler(event, context):
     # POST /jobs/from-url
     if method == 'POST' and path == '/jobs/from-url':
         return ingest_from_urls(body)
+
+    # POST /jobs/dedup-preview
+    if method == 'POST' and path == '/jobs/dedup-preview':
+        return dedup_preview()
+
+    # POST /jobs/dedup-apply
+    if method == 'POST' and path == '/jobs/dedup-apply':
+        return dedup_apply()
 
     # POST /scrape/indeed
     if method == 'POST' and path == '/scrape/indeed':

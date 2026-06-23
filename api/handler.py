@@ -207,22 +207,28 @@ def _posting_sort_key(job: dict) -> str:
 
 def _attach_company_info(items):
     company_ids = list({j['company_id'] for j in items if j.get('company_id')})
-    id_to_items = {}
+    id_to_company = {}
     for i in range(0, len(company_ids), 100):
         batch = company_ids[i:i + 100]
         resp = dynamodb.batch_get_item(
             RequestItems={
                 'companies': {
                     'Keys': [{'id': cid} for cid in batch],
-                    'ProjectionExpression': 'id, canonical_name, candidate_fit_score',
+                    'ProjectionExpression': 'id, canonical_name, candidate_fit_score, candidate_fit_reasoning',
                 }
             }
         )
         for item in resp.get('Responses', {}).get('companies', []):
-            id_to_items[item['id']] = (item.get('canonical_name'), item.get('candidate_fit_score', None))
+            id_to_company[item['id']] = {
+                'canonical_name': item.get('canonical_name'),
+                'candidate_fit_score': item.get('candidate_fit_score'),
+                'candidate_fit_reasoning': item.get('candidate_fit_reasoning'),
+            }
     for j in items:
-        j['canonical_name'] = id_to_items.get(j.get('company_id'), (None, None))[0]
-        j['candidate_fit_score'] = id_to_items.get(j.get('company_id'), (None, None))[1]
+        rec = id_to_company.get(j.get('company_id'), {})
+        j['canonical_name'] = rec.get('canonical_name')
+        j['candidate_fit_score'] = rec.get('candidate_fit_score')
+    return id_to_company
 
 
 def get_jobs(event, auth):
@@ -248,7 +254,7 @@ def get_jobs(event, auth):
                 if key.startswith('tailored_resume_') or key.startswith('cover_letter_'):
                     del item[key]
 
-    _attach_company_info(items)
+    id_to_company = _attach_company_info(items)
 
     if auth == 'absent':
         for item in items:
@@ -263,33 +269,50 @@ def get_jobs(event, auth):
             cid = job.get('company_id') or '__none__'
             by_company.setdefault(cid, []).append(job)
 
-        def _coerce_score(j):
+        def _coerce_match_score(j):
             raw = (j.get('screening') or {}).get('match_score', '')
             return int(raw) if str(raw).strip().isdigit() else -1
+
+        def _coerce_rec_score(j):
+            raw = (j.get('screening') or {}).get('recommendation_score', '')
+            return int(raw) if str(raw).strip().isdigit() else None
+
+        def _median_int(values):
+            if not values:
+                return None
+            s = sorted(values)
+            n = len(s)
+            mid = n // 2
+            if n % 2 == 1:
+                return s[mid]
+            return int(s[mid - 1] / 2 + s[mid] / 2 + 0.5)
 
         groups = []
         for cid, company_jobs in by_company.items():
             company_jobs.sort(
-                key=lambda j: (_coerce_score(j), _posting_sort_key(j)),
+                key=lambda j: (_coerce_match_score(j), _posting_sort_key(j)),
                 reverse=True,
             )
-            scores = [_coerce_score(j) for j in company_jobs if _coerce_score(j) != -1]
+            match_scores = [_coerce_match_score(j) for j in company_jobs if _coerce_match_score(j) != -1]
+            rec_scores = [s for j in company_jobs for s in [_coerce_rec_score(j)] if s is not None]
             representative = company_jobs[0]
             group = {
                 'company_id': cid if cid != '__none__' else None,
                 'canonical_name': representative.get('canonical_name'),
                 'count': len(company_jobs),
-                'best_score': max(scores) if scores else None,
-                'worst_score': min(scores) if scores else None,
+                'best_match_score': max(match_scores) if match_scores else None,
+                'median_recommendation_score': _median_int(rec_scores),
                 'jobs': company_jobs,
             }
             if auth != 'absent':
+                company_rec = id_to_company.get(cid, {})
                 group['candidate_fit_score'] = representative.get('candidate_fit_score')
+                group['company_research'] = company_rec.get('candidate_fit_reasoning')
             groups.append(group)
 
         groups.sort(key=lambda g: (
             0 if g['company_id'] is not None else 1,
-            -(g['best_score'] if g['best_score'] is not None else -1),
+            -(g['best_match_score'] if g['best_match_score'] is not None else -1),
         ))
 
         return response(200, {'companies': groups, 'counts': counts})

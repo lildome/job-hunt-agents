@@ -151,31 +151,32 @@ def invoke_lambda(function_name, payload):
 def _bucket_filter_expr(bucket):
     not_archived = Attr('archived_at').not_exists()
     not_failed = Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
+    not_duplicate = Attr('duplicate_of').not_exists()
 
     if bucket == 'screened':
         # Screened: analysis has never been attempted (no analysis block, or status 'pending').
         # Once any analysis state is reached (summarising/researching/matching/complete/failed),
         # the job moves to Analysed.
         return (
-            not_archived & not_failed &
+            not_archived & not_failed & not_duplicate &
             (Attr('analysis.status').not_exists() | Attr('analysis.status').eq('pending'))
         )
     if bucket == 'analysed':
         # Analysed: analysis has been initiated. Includes in-flight (summarising/researching/matching),
         # complete, and failed. Excludes applied (those move to the Applied bucket).
         return (
-            not_archived & not_failed &
+            not_archived & not_failed & not_duplicate &
             Attr('analysis.status').exists() &
             Attr('analysis.status').is_in(['summarising', 'researching', 'matching', 'complete', 'failed']) &
             ~Attr('status').is_in(APPLIED_STATUSES)
         )
     if bucket == 'applied':
         return (
-            not_archived & not_failed &
+            not_archived & not_failed & not_duplicate &
             Attr('status').is_in(APPLIED_STATUSES)
         )
     if bucket == 'archive':
-        return Attr('archived_at').exists() & not_failed
+        return Attr('archived_at').exists() & not_failed & not_duplicate
 
 
 def _scan_all(filter_expr, select=None):
@@ -194,6 +195,14 @@ def _scan_all(filter_expr, select=None):
         result = jobs_table.scan(**kwargs, ExclusiveStartKey=result['LastEvaluatedKey'])
         items.extend(result.get('Items', []))
     return items
+
+
+def _posting_sort_key(job: dict) -> str:
+    iso = normalise_posting_date(job.get('postingDate'), job.get('source', ''))
+    if iso:
+        return iso
+    scraped = job.get('scrapedAt') or ''
+    return str(scraped)[:10]
 
 
 def _attach_company_info(items):
@@ -246,6 +255,44 @@ def get_jobs(event, auth):
             item.pop('candidate_fit_score', None)
 
     counts = {b: _scan_all(_bucket_filter_expr(b), select='COUNT') for b in VALID_BUCKETS}
+
+    group_by_company = params.get('group_by_company') == 'true'
+    if group_by_company and bucket == 'screened':
+        by_company = {}
+        for job in items:
+            cid = job.get('company_id') or '__none__'
+            by_company.setdefault(cid, []).append(job)
+
+        def _coerce_score(j):
+            raw = (j.get('screening') or {}).get('match_score', '')
+            return int(raw) if str(raw).strip().isdigit() else -1
+
+        groups = []
+        for cid, company_jobs in by_company.items():
+            company_jobs.sort(
+                key=lambda j: (_coerce_score(j), _posting_sort_key(j)),
+                reverse=True,
+            )
+            scores = [_coerce_score(j) for j in company_jobs if _coerce_score(j) != -1]
+            representative = company_jobs[0]
+            group = {
+                'company_id': cid if cid != '__none__' else None,
+                'canonical_name': representative.get('canonical_name'),
+                'count': len(company_jobs),
+                'best_score': max(scores) if scores else None,
+                'worst_score': min(scores) if scores else None,
+                'jobs': company_jobs,
+            }
+            if auth != 'absent':
+                group['candidate_fit_score'] = representative.get('candidate_fit_score')
+            groups.append(group)
+
+        groups.sort(key=lambda g: (
+            0 if g['company_id'] is not None else 1,
+            -(g['best_score'] if g['best_score'] is not None else -1),
+        ))
+
+        return response(200, {'companies': groups, 'counts': counts})
 
     return response(200, {'jobs': items, 'counts': counts})
 

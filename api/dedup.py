@@ -1,34 +1,10 @@
-import re
-import string
 from datetime import date, datetime
 
 MATCH_SCORE_PROXIMITY = 1          # scores must be within this many points to be a duplicate
-FUZZY_CONTAINMENT_THRESHOLD = 0.8  # token-containment ratio above which fuzzy titles match
-
-_SENIORITY_TOKENS = {
-    "senior", "staff", "lead", "principal", "junior", "graduate",
-    "sr", "jr", "entry", "mid", "associate", "intern",
-}
-
-_LOCATION_SUFFIX_RE = re.compile(
-    r'[\-–—,]\s*[A-Z][^,\-–—]*$',
-    re.IGNORECASE,
-)
-_PAREN_RE = re.compile(r'\([^)]*\)')
 
 
 def normalise_title(title: str) -> str:
-    # strip parenthetical qualifiers before anything else
-    t = _PAREN_RE.sub('', title)
-    # strip trailing location suffix (after -, –, —, or ,)
-    t = _LOCATION_SUFFIX_RE.sub('', t)
-    # lowercase
-    t = t.lower()
-    # remove punctuation (but keep spaces)
-    t = t.translate(str.maketrans('', '', string.punctuation))
-    # collapse whitespace
-    t = ' '.join(t.split())
-    return t
+    return title.lower().strip()
 
 
 def normalise_posting_date(raw, source: str) -> 'str | None':
@@ -50,19 +26,8 @@ def normalise_posting_date(raw, source: str) -> 'str | None':
         return None
 
 
-def token_containment(norm_title_a: str, norm_title_b: str) -> float:
-    tokens_a = set(norm_title_a.split())
-    tokens_b = set(norm_title_b.split())
-    if not tokens_a or not tokens_b:
-        return 0.0
-    intersection = tokens_a & tokens_b
-    return len(intersection) / min(len(tokens_a), len(tokens_b))
-
-
 def titles_match(norm_a: str, norm_b: str) -> bool:
-    if norm_a == norm_b:
-        return True
-    return token_containment(norm_a, norm_b) >= FUZZY_CONTAINMENT_THRESHOLD
+    return norm_a == norm_b
 
 
 def is_duplicate(incoming: dict, candidate: dict) -> 'tuple[bool, str | None]':
@@ -75,8 +40,7 @@ def is_duplicate(incoming: dict, candidate: dict) -> 'tuple[bool, str | None]':
     if abs(incoming['match_score'] - candidate['match_score']) > MATCH_SCORE_PROXIMITY:
         return (False, None)
 
-    method = 'exact' if norm_a == norm_b else 'fuzzy'
-    return (True, method)
+    return (True, 'exact')
 
 
 def classify_type(incoming: dict, candidate: dict) -> int:

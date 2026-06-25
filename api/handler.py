@@ -44,6 +44,11 @@ profiles_table = dynamodb.Table('candidate_profiles')
 
 _serializer = TypeSerializer()
 
+# Shared filter predicates — single source of truth for visibility rules used
+# by both _bucket_filter_expr and the job_count recompute pass in dedup_apply.
+_NOT_FAILED = Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
+_NOT_DUPLICATE = Attr('duplicate_of').not_exists()
+
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type,X-Session-Token',
@@ -150,8 +155,8 @@ def invoke_lambda(function_name, payload):
 
 def _bucket_filter_expr(bucket):
     not_archived = Attr('archived_at').not_exists()
-    not_failed = Attr('ingestion_status').not_exists() | Attr('ingestion_status').ne('failed')
-    not_duplicate = Attr('duplicate_of').not_exists()
+    not_failed = _NOT_FAILED
+    not_duplicate = _NOT_DUPLICATE
 
     if bucket == 'screened':
         # Screened: analysis has never been attempted (no analysis block, or status 'pending').
@@ -1310,10 +1315,50 @@ def dedup_apply():
                     logger.error(f"dedup-apply: failed to mark {member_id} as duplicate: {e}")
                     rejected.append({'job_id': member_id, 'reason': 'mark_failed'})
 
-            # TODO: job_count on company records may be overcounted on existing data
-            # (each member was counted when first screened). A future pass could recompute.
-
             clusters_applied += 1
+
+    # Recompute job_count for all companies.
+    # A frontend-visible job passes _NOT_FAILED & _NOT_DUPLICATE (the intersection of
+    # conditions common to every bucket, including archive).
+    visibility_filter = _NOT_FAILED & _NOT_DUPLICATE
+    kwargs = {
+        'FilterExpression': visibility_filter,
+        'ProjectionExpression': 'company_id',
+    }
+    vis_result = jobs_table.scan(**kwargs)
+    visible_items = list(vis_result.get('Items', []))
+    while 'LastEvaluatedKey' in vis_result:
+        vis_result = jobs_table.scan(**kwargs, ExclusiveStartKey=vis_result['LastEvaluatedKey'])
+        visible_items.extend(vis_result.get('Items', []))
+
+    tally: dict = {}
+    for item in visible_items:
+        cid = item.get('company_id')
+        if cid:
+            tally[cid] = tally.get(cid, 0) + 1
+
+    # Fetch all company IDs so companies that dropped to zero visible jobs get written to 0.
+    comp_scan = companies_table.scan(ProjectionExpression='id')
+    all_company_ids = {item['id'] for item in comp_scan.get('Items', [])}
+    while 'LastEvaluatedKey' in comp_scan:
+        comp_scan = companies_table.scan(
+            ProjectionExpression='id',
+            ExclusiveStartKey=comp_scan['LastEvaluatedKey'],
+        )
+        all_company_ids.update(item['id'] for item in comp_scan.get('Items', []))
+
+    for cid in all_company_ids:
+        count = tally.get(cid, 0)
+        try:
+            companies_table.update_item(
+                Key={'id': cid},
+                UpdateExpression='SET job_count = :c',
+                ExpressionAttributeValues={':c': count},
+            )
+        except Exception as e:
+            logger.error(f"dedup-apply: failed to update job_count for company {cid}: {e}")
+
+    logger.info(f"dedup-apply: job_count recomputed for {len(all_company_ids)} companies")
 
     all_failed = len(accepted) == 0 and any(
         r['reason'] in ('survivor_update_failed', 'mark_failed') for r in rejected

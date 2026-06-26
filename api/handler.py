@@ -33,6 +33,8 @@ VALID_STATUSES = {'new', 'applied', 'interviewing', 'offer', 'rejected'}
 APPLIED_STATUSES = ['applied', 'interviewing', 'offer', 'rejected']
 VALID_BUCKETS = {'screened', 'analysed', 'applied', 'archive'}
 
+SCREENED_SCORE_THRESHOLD = 7
+
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 lambda_client = boto3.client('lambda', region_name='us-east-1')
 s3_client = boto3.client('s3', region_name='us-east-1')
@@ -153,6 +155,29 @@ def invoke_lambda(function_name, payload):
     )
     return json.loads(result['Payload'].read())
 
+def _passes_screened_threshold(job, threshold=SCREENED_SCORE_THRESHOLD):
+    """Returns True if the job should be visible in the screened bucket.
+
+    Hidden only when BOTH match_score and recommendation_score are present,
+    numeric, and both strictly below threshold. Any missing/unparseable score
+    means the job is shown (surface it rather than silently dropping it).
+    """
+    screening = job.get('screening') or {}
+
+    def _to_int(val):
+        try:
+            return int(str(val).strip())
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    match = _to_int(screening.get('match_score'))
+    rec = _to_int(screening.get('recommendation_score'))
+
+    if match is None or rec is None:
+        return True
+    return match >= threshold or rec >= threshold
+
+
 def _bucket_filter_expr(bucket):
     not_archived = Attr('archived_at').not_exists()
     not_failed = _NOT_FAILED
@@ -249,6 +274,7 @@ def get_jobs(event, auth):
         return response(400, {'error': f"Invalid bucket '{bucket}'. Must be one of: screened, analysed, applied, archive"})
 
     items = _scan_all(_bucket_filter_expr(bucket))
+    include_below_threshold = params.get('include_below_threshold') == 'true'
 
     for item in items:
         item.pop('description', None)
@@ -265,12 +291,27 @@ def get_jobs(event, auth):
         for item in items:
             item.pop('candidate_fit_score', None)
 
-    counts = {b: _scan_all(_bucket_filter_expr(b), select='COUNT') for b in VALID_BUCKETS}
+    # Screened count: always computed in Python (threshold can't be expressed as a
+    # DynamoDB FilterExpression). Reuse already-fetched items when bucket is screened.
+    if bucket == 'screened':
+        screened_items_for_count = items
+    else:
+        screened_items_for_count = _scan_all(_bucket_filter_expr('screened'))
+
+    if include_below_threshold:
+        screened_count = len(screened_items_for_count)
+    else:
+        screened_count = sum(1 for j in screened_items_for_count if _passes_screened_threshold(j))
+
+    counts = {b: (_scan_all(_bucket_filter_expr(b), select='COUNT') if b != 'screened' else screened_count)
+              for b in VALID_BUCKETS}
 
     group_by_company = params.get('group_by_company') == 'true'
     if group_by_company and bucket == 'screened':
+        visible_jobs = items if include_below_threshold else [j for j in items if _passes_screened_threshold(j)]
+
         by_company = {}
-        for job in items:
+        for job in visible_jobs:
             cid = job.get('company_id') or '__none__'
             by_company.setdefault(cid, []).append(job)
 
@@ -321,6 +362,10 @@ def get_jobs(event, auth):
         ))
 
         return response(200, {'companies': groups, 'counts': counts})
+
+    # Flat list: apply threshold filter for screened bucket
+    if bucket == 'screened' and not include_below_threshold:
+        items = [j for j in items if _passes_screened_threshold(j)]
 
     return response(200, {'jobs': items, 'counts': counts})
 

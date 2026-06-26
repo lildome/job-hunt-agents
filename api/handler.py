@@ -675,6 +675,195 @@ def get_resume_download(job_id):
     return response(200, {'url': url})
 
 
+def _render_requirements(reqs) -> str:
+    if not reqs:
+        return '  (none listed)'
+    lines = []
+    for r in reqs:
+        req = r.get('requirement', '(unknown)')
+        conf = r.get('confidence', '')
+        lines.append(f'  - {req}' + (f' [{conf}]' if conf else ''))
+    return '\n'.join(lines)
+
+
+def _assemble_context_prompt(job: dict, company: dict, profile: dict) -> str:
+    analysis = job.get('analysis', {})
+    summary = analysis.get('summary', {})
+
+    # Role
+    display_company = company.get('canonical_name') or job.get('company', '(unknown)')
+    role_lines = [
+        f"Title: {job.get('positionName', '(not available)')}",
+        f"Company: {display_company}",
+        f"Location: {job.get('location', '(not available)')}",
+        f"Source: {job.get('source', '(not available)')}",
+    ]
+
+    # Role Summary
+    job_title = summary.get('job_title', '(not available)')
+    job_summary = summary.get('job_summary', '(not available)')
+    edu_reqs = _render_requirements(summary.get('education_requirements'))
+    exp_reqs = _render_requirements(summary.get('experience_requirements'))
+    skill_reqs = _render_requirements(summary.get('skill_requirements'))
+    salary = summary.get('salary', '(not available)')
+    red_flags = summary.get('red_flags')
+    red_flag_text = ', '.join(red_flags) if isinstance(red_flags, list) and red_flags else str(red_flags or '(none)')
+
+    role_summary_lines = [
+        f"Job Title: {job_title}",
+        f"\n{job_summary}",
+        f"\nEducation Requirements:\n{edu_reqs}",
+        f"\nExperience Requirements:\n{exp_reqs}",
+        f"\nSkill Requirements:\n{skill_reqs}",
+        f"\nSalary: {salary}",
+        f"\nRed Flags: {red_flag_text}",
+    ]
+
+    # Fit Analysis
+    match_score = analysis.get('match_score', '(not available)')
+    match_reasoning = analysis.get('match_reasoning', '(not available)')
+
+    # Company Research
+    has_research = bool(company.get('research_last_updated'))
+    if has_research:
+        co_lines = []
+        if company.get('summary'):
+            co_lines.append(company['summary'])
+        if company.get('industry'):
+            co_lines.append(f"\nIndustry: {company['industry']}")
+        if company.get('company_size'):
+            co_lines.append(f"Company Size: {company['company_size']}")
+        if company.get('culture_notes'):
+            notes = company['culture_notes']
+            if isinstance(notes, list):
+                co_lines.append('\nCulture Notes:\n' + '\n'.join(f'  - {n}' for n in notes))
+            else:
+                co_lines.append(f'\nCulture Notes: {notes}')
+        if company.get('recent_news'):
+            co_lines.append(f'\nRecent News: {company["recent_news"]}')
+        if company.get('hiring_reputation'):
+            co_lines.append(f'\nHiring Reputation: {company["hiring_reputation"]}')
+        if company.get('website'):
+            co_lines.append(f'\nWebsite: {company["website"]}')
+        if company.get('candidate_fit_score') is not None or company.get('candidate_fit_reasoning'):
+            co_lines.append(f'\nCandidate Fit Score: {company.get("candidate_fit_score", "(not available)")}')
+            if company.get('candidate_fit_reasoning'):
+                co_lines.append(f'Candidate Fit Reasoning: {company["candidate_fit_reasoning"]}')
+        company_section = '\n'.join(co_lines) if co_lines else '(no company research available)'
+    else:
+        company_section = '(no company research available)'
+
+    # Profile
+    name = profile.get('name', '(not available)')
+    cv_summary_text = profile.get('cv_summary_text', '(not available)')
+    prof_summary = profile.get('summary', '(not available)')
+
+    # Experience
+    exp_blocks = []
+    for job_entry in (profile.get('experience') or []):
+        header = f"{job_entry.get('role', '(unknown role)')} — {job_entry.get('company', '(unknown company)')} ({job_entry.get('period', '')})"
+        bullets = job_entry.get('bullets') or []
+        bullet_lines = '\n'.join(f'  • {b}' for b in bullets)
+        exp_blocks.append(header + ('\n' + bullet_lines if bullet_lines else ''))
+    experience_text = '\n\n'.join(exp_blocks) if exp_blocks else '(not available)'
+
+    # Skills
+    skill_blocks = []
+    categories = (profile.get('skills') or {}).get('categories') or []
+    for cat in categories:
+        label = cat.get('label', '(unknown category)')
+        items = cat.get('items') or []
+        item_lines = []
+        for skill_item in items:
+            skill_name = skill_item.get('name', '')
+            proficiency = skill_item.get('proficiency', '')
+            description = skill_item.get('description', '')
+            item_lines.append(f'  • {skill_name} [{proficiency}]: {description}')
+        skill_blocks.append(label + '\n' + '\n'.join(item_lines))
+    skills_text = '\n\n'.join(skill_blocks) if skill_blocks else '(not available)'
+
+    # Projects
+    proj_blocks = []
+    for proj in (profile.get('projects') or []):
+        title = proj.get('title', '(unknown project)')
+        subtitle = proj.get('subtitle', '')
+        header = title + (f' — {subtitle}' if subtitle else '')
+        bullets = proj.get('bullets') or []
+        bullet_lines = '\n'.join(f'  • {b}' for b in bullets)
+        proj_blocks.append(header + ('\n' + bullet_lines if bullet_lines else ''))
+    projects_text = '\n\n'.join(proj_blocks) if proj_blocks else '(not available)'
+
+    # Preferences (excluding voice_reference)
+    prefs = profile.get('preferences') or {}
+    pref_lines = []
+    for field, label in [
+        ('company_size', 'Company Size'),
+        ('culture', 'Culture'),
+        ('role_focus', 'Role Focus'),
+        ('work_style', 'Work Style'),
+        ('additional_preferences', 'Additional'),
+    ]:
+        val = prefs.get(field)
+        if val:
+            pref_lines.append(f'{label}: {val}')
+    preferences_text = '\n'.join(pref_lines) if pref_lines else '(not available)'
+
+    # Voice reference
+    voice_reference = prefs.get('voice_reference', '(not available)')
+
+    # Education
+    edu = profile.get('education') or {}
+    edu_lines = []
+    if edu.get('institution'):
+        edu_lines.append(edu['institution'])
+    if edu.get('degrees'):
+        degrees = edu['degrees']
+        if isinstance(degrees, list):
+            edu_lines.extend(f'  • {d}' for d in degrees)
+        else:
+            edu_lines.append(f'  • {degrees}')
+    if edu.get('year'):
+        edu_lines.append(f'Graduated: {edu["year"]}')
+    education_text = '\n'.join(edu_lines) if edu_lines else '(not available)'
+
+    sections = [
+        'The following is context about a job candidate and a specific role they are applying for, provided to assist with various parts of the job application process — including interview preparation, company research, and answering application questions. The message after this one will contain specific instructions for what to do with this context. Do not act on this context yet. Once you have read and understood everything below, respond only with "Understood" and wait for the instructions that follow.',
+        '## The Role\nBasic details of the position the candidate is applying for.\n\n' + '\n'.join(role_lines),
+        '## Role Summary\nA condensed summary of the role, generated from the job description.\n\n' + '\n'.join(role_summary_lines),
+        '## Candidate Fit Analysis\nAn assessment of how well this candidate matches this specific role, including areas of strong alignment and notable gaps. This is an analytical evaluation, not a recommendation to apply.\n\nMatch Score: ' + str(match_score) + '\n\n' + str(match_reasoning),
+        '## Company Research\nResearched background on the employer — business, products, culture, and other relevant context.\n\n' + company_section,
+        f'## Candidate Self-Assessment (candid, internal)\nName: {name}\n\nAn honest internal appraisal of the candidate\'s strengths, weaknesses, seniority level, and what they are genuinely looking for. This is a frank working assessment, not marketing copy — use it to understand the candidate accurately, including their limitations.\n\n' + cv_summary_text,
+        '## Candidate Professional Summary (outward-facing)\nThe candidate\'s polished professional summary, as used on resumes and in applications. Use this as a reference for the candidate\'s outward-facing positioning and tone.\n\n' + prof_summary,
+        '## Experience\nThe candidate\'s professional work history.\n\n' + experience_text,
+        '## Skills\nThe candidate\'s technical skills, grouped by category. Each entry includes a self-described proficiency level and notes on how the skill has actually been used.\n\n' + skills_text,
+        '## Projects\nNotable personal and professional projects.\n\n' + projects_text,
+        '## Preferences & Working Style\nThe candidate\'s preferences regarding role type, company size, culture, and work arrangement.\n\n' + preferences_text,
+        '## Writing Voice & Sample\nA writing sample that demonstrates the candidate\'s natural voice and how they think and communicate. When drafting any written response in the candidate\'s voice — application questions, cover-letter-style answers, or any free-text response — match the tone, register, and style of this sample rather than defaulting to generic professional writing.\n\n' + voice_reference,
+        '## Education\nThe candidate\'s academic background.\n\n' + education_text,
+    ]
+    return '\n\n---\n\n'.join(sections)
+
+
+def get_context_prompt(job_id: str) -> dict:
+    job = jobs_table.get_item(Key={'id': job_id}).get('Item')
+    if not job:
+        return response(404, {'error': f'Job {job_id} not found'})
+
+    analysis = job.get('analysis')
+    if not analysis or analysis.get('status') != 'complete':
+        return response(400, {'error': 'Context prompt is only available for fully analysed jobs'})
+
+    company_id = job.get('company_id')
+    company = {}
+    if company_id:
+        company = companies_table.get_item(Key={'id': company_id}).get('Item', {})
+
+    profile = profiles_table.get_item(Key={'profile_id': 'primary'}).get('Item', {})
+
+    prompt = _assemble_context_prompt(job, company, profile)
+    return response(200, {'prompt': prompt})
+
+
 def get_cover_letter_download(job_id):
     job = jobs_table.get_item(Key={'id': job_id}).get('Item')
     if not job:
@@ -1527,6 +1716,11 @@ def lambda_handler(event, context):
     # POST /scrape/seek
     if method == 'POST' and path == '/scrape/seek':
         return start_seek_scrape(body)
+
+    # GET /jobs/{id}/context-prompt
+    m = re.match(r'^/jobs/([^/]+)/context-prompt$', path)
+    if m and method == 'GET':
+        return get_context_prompt(m.group(1))
 
     # GET /jobs/{id}/resume/download
     m = re.match(r'^/jobs/([^/]+)/resume/download$', path)

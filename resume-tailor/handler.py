@@ -289,7 +289,6 @@ def _llm_call(system: str, user: str, max_tokens: int = 10000, thinking = False,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-    logger.info("\n".join([block.text for block in response.content if block.type == "text"] + [block.thinking for block in response.content if block.type == "thinking"]))
     for block in response.content:
         if block.type == "text":
             return block.text

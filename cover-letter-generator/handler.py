@@ -268,7 +268,7 @@ def lambda_handler(event, context):
         response = anthropic_client.messages.create(
             model="claude-opus-4-8",
             thinking={"type": "adaptive"},
-            max_tokens=2048,
+            max_tokens=10000,
             system=AUTONOMOUS_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )

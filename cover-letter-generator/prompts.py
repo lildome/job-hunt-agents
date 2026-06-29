@@ -54,7 +54,7 @@ These fields fill specific JSON keys and follow specific rules.
 - Signature: the candidate's name, matching the sender.name field exactly.
 
 OUTPUT FORMAT:
-Return ONLY valid JSON matching this exact schema. No markdown, no preamble, no commentary, no text after the closing brace.
+Return ONLY valid JSON matching this exact schema. No markdown, no preamble, no commentary, no text after the closing brace. body_paragraphs is an array of plain JSON strings, one per paragraph, never objects or nested structures (e.g. ["First paragraph text.", "Second paragraph text."], never [{"text": "First paragraph text."}]).
 
 {
   "sender": { "name": string, "location": string, "email": string, "phone": string },

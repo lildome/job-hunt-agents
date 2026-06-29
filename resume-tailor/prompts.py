@@ -37,7 +37,7 @@ BULLET LENGTH TARGETS:
 - Do not use em dashes in bullets.
  
 OUTPUT FORMAT:
-Return ONLY valid JSON matching this exact schema. No markdown, no preamble, no commentary:
+Return ONLY valid JSON matching this exact schema. No markdown, no preamble, no commentary. Every array shown as [string] contains only plain JSON strings, never objects or nested structures: experience[].bullets, projects[].bullets, skills[].items, and education.degrees must each be arrays of plain strings (e.g. "items": ["Python", "Go"], never [{"name": "Python"}]).
  
 {
   "name": string,

@@ -273,14 +273,22 @@ def render_markdown(resume: dict) -> str:
 
 # ─── LLM helpers ─────────────────────────────────────────────────────────────
 
-def _llm_call(system: str, user: str, max_tokens: int = 4096) -> str:
-    response = anthropic_client.messages.create(
-        model="claude-opus-4-8",
-        thinking={"type": "adaptive"},
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+def _llm_call(system: str, user: str, max_tokens: int = 10000, thinking = False) -> str:
+    if thinking:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-8",
+            thinking={"type": "adaptive"},
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+    else:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
     logger.info("\n".join([block.text for block in response.content if block.type == "text"] + [block.thinking for block in response.content if block.type == "thinking"]))
     for block in response.content:
         if block.type == "text":
@@ -386,7 +394,7 @@ def lambda_handler(event, context):
         # Pass 1: tailor
         logger.info("Pass 1: tailoring resume")
         tailor_user = _build_tailor_user_prompt(job, company, cv)
-        raw_json = _llm_call(TAILOR_SYSTEM_PROMPT, tailor_user)
+        raw_json = _llm_call(TAILOR_SYSTEM_PROMPT, tailor_user, thinking=True)
         resume_data = _parse_json(raw_json, "tailor pass")
         _validate_resume(resume_data)
         logger.info("Pass 1 complete — schema valid")

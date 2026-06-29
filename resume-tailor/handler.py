@@ -275,7 +275,7 @@ def render_markdown(resume: dict) -> str:
 
 def _llm_call(system: str, user: str, max_tokens: int = 4096) -> str:
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-8",
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],

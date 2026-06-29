@@ -266,7 +266,7 @@ def lambda_handler(event, context):
 
         logger.info("Running LLM call for %s", label)
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-8",
             max_tokens=2048,
             system=AUTONOMOUS_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

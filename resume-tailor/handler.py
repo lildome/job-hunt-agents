@@ -273,10 +273,10 @@ def render_markdown(resume: dict) -> str:
 
 # ─── LLM helpers ─────────────────────────────────────────────────────────────
 
-def _llm_call(system: str, user: str, max_tokens: int = 10000, thinking = False) -> str:
+def _llm_call(system: str, user: str, max_tokens: int = 10000, thinking = False, model='claude-opus-4-8') -> str:
     if thinking:
         response = anthropic_client.messages.create(
-            model="claude-opus-4-8",
+            model=model,
             thinking={"type": "adaptive"},
             max_tokens=max_tokens,
             system=system,
@@ -284,7 +284,7 @@ def _llm_call(system: str, user: str, max_tokens: int = 10000, thinking = False)
         )
     else:
         response = anthropic_client.messages.create(
-            model="claude-opus-4-8",
+            model=model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -410,7 +410,7 @@ def lambda_handler(event, context):
         # Pass 3: repair (only if orphans found)
         if orphans:
             repair_user = _build_repair_user_prompt(job, company, cv, resume_data, orphans)
-            raw_repairs = _llm_call(REPAIR_SYSTEM_PROMPT, repair_user, max_tokens=2048)
+            raw_repairs = _llm_call(REPAIR_SYSTEM_PROMPT, repair_user, max_tokens=2048, model='claude-sonnet-4-6')
             repairs_data = _parse_json(raw_repairs, "repair pass")
             repairs = repairs_data.get("repairs", [])
             resume_data = apply_repairs(resume_data, repairs)
